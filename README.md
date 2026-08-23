@@ -95,7 +95,7 @@ Premium is **$3 AUD/month** — or by invite code.
 
 - **[EmulatorJS](https://emulatorjs.org)** (libretro cores) — the actual emulation engine. All emulation happens here; ROM Player is a frontend around it.
 - **[coops_emulator_backbone](https://github.com/coops-emulator/coops_emulator_backbone)** — our own wrapper around EmulatorJS (`emulator-backbone.js`), used to boot every system it covers. Replaced this app's previous hand-rolled `EJS_*` global wiring with a promise-based `loadGame()` API, a verified system-id registry, and actionable errors instead of silent black screens. Systems it doesn't cover yet (Virtual Boy, Intellivision, Vectrex, MSX) fall back to the original direct wiring.
-- **PeerJS** — P2P ROM Exchange
+- **PeerJS** — P2P File Exchange
 - **Supabase** — auth + user profiles + premium status
 - **Cloudflare Pages** — hosting + edge functions
 - **IndexedDB + OPFS** — local ROM and save state storage
