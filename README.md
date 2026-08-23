@@ -68,8 +68,8 @@ A browser-based retro gaming PWA. Drop in a ROM, hit play — no installs, no ex
 - Deep Space (default)
 - NES, SNES, Game Boy, N64, Genesis, GBA, PS1
 
-**ROM Exchange**
-- P2P ROM sharing between users via PeerJS
+**Linkup Room**
+- P2P File sharing between users via PeerJS
 - No server — direct peer-to-peer
 
 ---
@@ -82,7 +82,7 @@ A browser-based retro gaming PWA. Drop in a ROM, hit play — no installs, no ex
 | Save states | ✅ | ✅ |
 | Rewind | ✅ | ✅ |
 | Cover art | ✅ | ✅ |
-| ROM Exchange | ✅ | ✅ |
+| Linkup Room | ✅ | ✅ |
 | Cloud save sync | ❌ | ✅ |
 | Library sync across devices | ❌ | ✅ |
 | Cloud ROM storage (Drive/Dropbox) | ❌ | ✅ |
