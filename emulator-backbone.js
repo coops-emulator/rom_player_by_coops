@@ -102,6 +102,18 @@
     gb:   { bufferSize: 128, granularity: 1 },
     gbc:  { bufferSize: 128, granularity: 1 },
     genesis: { bufferSize: 128, granularity: 1 },
+    // PSP: rewind is disabled outright, not just tuned down. Rewind works
+    // by having the core serialize its FULL state — CPU + ALL of VRAM +
+    // the texture cache — into the ring buffer every `granularity` frames.
+    // ppsspp is already the heaviest core this app runs (single beta 3D
+    // core, threaded, no other system here comes close to its per-frame
+    // state size), so that periodic full-state snapshot lands as a
+    // recurring hitch on top of the emulation itself — this shows up as
+    // stutter/audio-crackle rather than an evenly slow game. No other
+    // system pays anywhere near this tax. See loadGame() below for how
+    // `disabled` is honored — it fully skips reserving/writing the
+    // rewind buffer rather than just shrinking it.
+    psp: { disabled: true },
     default: { bufferSize: 128, granularity: 2 },
   };
 
@@ -267,13 +279,29 @@
           opts.rewind && typeof opts.rewind === "object"
             ? { ...getRewindProfile(systemId), ...opts.rewind }
             : getRewindProfile(systemId);
-        window.EJS_rewindEnabled = true;
-        window.EJS_rewindGranularity = profile.granularity;
-        window.EJS_defaultOptions = Object.assign(window.EJS_defaultOptions || {}, {
-          rewind_enable: "enabled",
-          rewind_buffer_size: String(profile.bufferSize),
-          rewind_granularity: String(profile.granularity),
-        });
+
+        if (profile.disabled) {
+          // System-level override (see REWIND_PROFILES, e.g. psp) — rewind
+          // costs more than it's worth for this core. Explicitly tell EJS
+          // it's off rather than just skipping the buffer-size/granularity
+          // keys below: EJS_rewindEnabled and EJS_defaultOptions are plain
+          // shared globals (same boot-generation-guard caveat as
+          // onGameStart etc. above), so a PREVIOUS game's "enabled" value
+          // must be actively overwritten here, not left alone, or it can
+          // leak into this boot.
+          window.EJS_rewindEnabled = false;
+          window.EJS_defaultOptions = Object.assign(window.EJS_defaultOptions || {}, {
+            rewind_enable: "disabled",
+          });
+        } else {
+          window.EJS_rewindEnabled = true;
+          window.EJS_rewindGranularity = profile.granularity;
+          window.EJS_defaultOptions = Object.assign(window.EJS_defaultOptions || {}, {
+            rewind_enable: "enabled",
+            rewind_buffer_size: String(profile.bufferSize),
+            rewind_granularity: String(profile.granularity),
+          });
+        }
       }
 
       if (opts.defaultOptions) {
