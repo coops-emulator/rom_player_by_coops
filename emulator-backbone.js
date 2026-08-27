@@ -243,8 +243,8 @@
           `${cfg.label} requires SharedArrayBuffer, which requires this page to be served with ` +
           `Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: credentialless ` +
           `response headers (this is a real browser security requirement, not an EmulatorJS quirk). ` +
-          `"crossOriginIsolated" is currently false. See deploy/ in coops_emulator_backbone for header ` +
-          `configs that fix this.`
+          `"crossOriginIsolated" is currently false. See deploy/ in coops_emulator_backbone for ready-made ` +
+          `header configs, or _headers/netlify.toml in this repo for what's already configured.`
         );
       }
 

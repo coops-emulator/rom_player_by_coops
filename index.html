@@ -2362,7 +2362,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260827034906"></script>
+<script src="emulator-backbone.js?v=20260827083233"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -4937,13 +4937,40 @@ async function launch(romUrl, sys, name, file) {
       showToast('🚧 PSP emulation is in beta — expect occasional crashes, slowdowns, or graphical glitches, especially in 3D-heavy games.');
     }
 
+    // EXPERIMENTAL (2026-08-27): PSP alone boots from EmulatorJS's `nightly`
+    // CDN channel instead of the site-wide `stable` one, to pick up a
+    // documented upstream fix - EmulatorJS's own changelog for this build
+    // says "Fix hardware rendering for PPSSPP core" and describes PPSSPP as
+    // "significantly more playable" as a result. That's a plausible match
+    // for real, sustained slowness that persisted even after disabling
+    // rewind (which WAS the periodic-hitch fix, and is unrelated to this).
+    //
+    // Scoped to PSP only, on purpose: `nightly` updates daily and
+    // EmulatorJS's own release notes call it explicitly unstable
+    // ("cores are not inter-changeable between versions... things may
+    // break"). Every other system in this app stays on `stable`,
+    // completely unaffected by this - this line is the ONLY thing that
+    // changes for them (a plain `{}` opts object, same as before).
+    //
+    // If PSP starts behaving worse than before (new crashes, boot
+    // failures, different graphical bugs) rather than better, the fix is
+    // to delete the ppsspp branch of this ternary and let it fall through
+    // to `{}` like every other system - that alone fully reverts this
+    // experiment with no other changes needed anywhere.
+    const engineOpts = sys.core === 'ppsspp'
+      ? { pathToData: 'https://cdn.emulatorjs.org/nightly/data/' }
+      : {};
+    if (sys.core === 'ppsspp') {
+      console.log('[launch] PSP: using EmulatorJS nightly channel (experimental) —', engineOpts.pathToData);
+    }
+
     if (backbone && sys.ejsSystem) {
       // ── Verified path: boot through coops_emulator_backbone ────────────
       // Rewind tuning comes from the backbone's own getRewindProfile() —
       // the same per-system numbers this app used to hardcode here, now
       // maintained in one place (see emulator-backbone.js).
       try {
-        _engine = new backbone.EmulatorEngine(document.getElementById('game'));
+        _engine = new backbone.EmulatorEngine(document.getElementById('game'), engineOpts);
         _engine.onGameStart(onGameStart);
         await _engine.loadGame(sys.ejsSystem, romUrl, {
           gameName: name,
@@ -5831,7 +5858,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260827034906';
+const APP_VERSION = '20260827083233';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
