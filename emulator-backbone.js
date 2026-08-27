@@ -241,7 +241,7 @@
       if (cfg.requiresThreads && typeof crossOriginIsolated !== "undefined" && !crossOriginIsolated) {
         throw new Error(
           `${cfg.label} requires SharedArrayBuffer, which requires this page to be served with ` +
-          `Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp ` +
+          `Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: credentialless ` +
           `response headers (this is a real browser security requirement, not an EmulatorJS quirk). ` +
           `"crossOriginIsolated" is currently false. See deploy/ in coops_emulator_backbone for header ` +
           `configs that fix this.`
