@@ -2362,7 +2362,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260827083233"></script>
+<script src="emulator-backbone.js?v=20260828204515"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -2988,11 +2988,28 @@ function _mobileGameHeight() {
   return Math.max(220, Math.min(available, Math.floor(window.innerHeight * 0.72)));
 }
 
+// Same phone-landscape threshold the CSS already uses (see the
+// "@media (max-height: 500px) and (orientation: landscape)" rule above) —
+// keeps this check consistent with what the stylesheet considers "a phone
+// on its side" rather than picking a second, independently-tunable number.
+const _isPhoneLandscape = () =>
+  window.matchMedia('(max-height: 500px) and (orientation: landscape)').matches;
+
 function applyGameHolderHeight() {
   const gh = document.getElementById('game-holder');
   if (!gh) return;
 
-  if (_currentSize === 'fill') {
+  // 'Mobile' behaves like 'Fill' once the phone is rotated on its side.
+  // _mobileGameHeight() reserves a fixed ~198px chrome budget (header +
+  // top-bar + actions + padding) that's a small fraction of a tall portrait
+  // viewport but eats more than half a short landscape one — that's what
+  // was making the game window "tiny" on rotation. Fill never reserves
+  // that budget, so once we're in true phone landscape we just borrow
+  // Fill's own styling instead of computing a shrunken height.
+  const useFillLayout = _currentSize === 'fill' ||
+    (_currentSize === 'mobile' && _isPhoneLandscape());
+
+  if (useFillLayout) {
     gh.style.height = '';
     gh.style.minHeight = '100dvh';
     gh.style.maxHeight = '';
@@ -3020,7 +3037,10 @@ function _updateSizePreview() {
   const bar = document.getElementById('size-preview-fill');
   if (!bar) return;
   const pcts = { mobile: 55, medium: 65, large: 80, fill: 100, custom: 70 };
-  bar.style.width = (pcts[_currentSize] || 65) + '%';
+  // Mirror the actual layout: 'Mobile' reports 100% in phone landscape
+  // since it's borrowing Fill's styling there (see applyGameHolderHeight).
+  const effectiveSize = (_currentSize === 'mobile' && _isPhoneLandscape()) ? 'fill' : _currentSize;
+  bar.style.width = (pcts[effectiveSize] || 65) + '%';
 }
 
 function renderSizeOptions() {
@@ -3652,6 +3672,9 @@ async function libRemove(name, core) {
   // Also clean up any IDB rom entry (fallback path)
   await dbDelete(ROM_STORE, id).catch(() => {});
   await dbDelete(META_STORE, id);
+  // Premium only, best-effort — see deleteFromCloudLibrary()'s comment for
+  // why this is Supabase-only and never reaches into the user's Dropbox.
+  deleteFromCloudLibrary(id).catch(() => {});
   renderLibrary();
 }
 
@@ -3734,6 +3757,97 @@ async function libToggleFavourite(name, core) {
   renderLibrary();
 }
 
+/* ── Rename a game ──────────────────────────────────────
+   The id everything is keyed on (library entry, save states, cover-art
+   cache) is `core + '::' + name`, so renaming isn't a single field edit —
+   every store keyed on the old id has to move to the new one. The actual
+   point of this feature is the cover-art step: dropping the stale
+   coverArt cache entry (whether it was a hit or a cached "not found")
+   means getCoverArt() does a genuine fresh IGDB lookup under the
+   cleaned-up name instead of replaying whatever result the old, messier
+   name produced. A manual art override, if the user set one, is carried
+   over rather than dropped. ─────────────────────────────────────────── */
+async function renameGame(oldName, core) {
+  const oldId = makeId(oldName, core);
+  const input = prompt('Rename game:', oldName);
+  if (input === null) return; // cancelled
+  const newName = input.trim();
+  if (!newName || newName === oldName) return;
+
+  const newId = makeId(newName, core);
+
+  // Block exact-id collisions rather than silently merging two entries'
+  // saves/playtime — that's a different feature (see findLikelyDuplicate,
+  // which handles the "these look like the same game" duplicate-add flow).
+  const clash = await dbGet(META_STORE, newId).catch(() => null);
+  if (clash) {
+    showToast('❌ A game with that name already exists for this system');
+    return;
+  }
+
+  const meta = await dbGet(META_STORE, oldId).catch(() => null);
+  if (!meta) return;
+
+  // 1. Library metadata — the primary record
+  meta.id = newId;
+  meta.name = newName;
+  await dbPut(META_STORE, meta);
+  await dbDelete(META_STORE, oldId).catch(() => {});
+
+  // 2. Legacy ROM blob (pre-OPFS installs) — most entries won't have one
+  const rom = await dbGet(ROM_STORE, oldId).catch(() => null);
+  if (rom) {
+    rom.id = newId;
+    await dbPut(ROM_STORE, rom);
+    await dbDelete(ROM_STORE, oldId).catch(() => {});
+  }
+
+  // 3. Save states — every possible slot (NUM_SLOTS_PREMIUM, not just the
+  // current tier's NUM_SLOTS) so a former-premium user's higher slots
+  // don't get orphaned under the old id.
+  for (let slot = 0; slot < NUM_SLOTS_PREMIUM; slot++) {
+    const oldKey = ssKey(oldId, slot);
+    const ss = await dbGet(SS_STORE, oldKey).catch(() => null);
+    if (!ss) continue;
+    const newKey = ssKey(newId, slot);
+    ss.id = newKey;
+    ss.game = newId;
+    await dbPut(SS_STORE, ss);
+    await dbDelete(SS_STORE, oldKey).catch(() => {});
+  }
+
+  // 4. Cover art — see function header. Manual overrides move with the
+  // game; auto-fetched/notFound results are dropped so they refetch fresh.
+  const art = await dbGet(ART_STORE, oldId).catch(() => null);
+  if (art) {
+    if (art.manual) {
+      art.id = newId;
+      await dbPut(ART_STORE, art);
+    }
+    await dbDelete(ART_STORE, oldId).catch(() => {});
+  }
+  delete _artMemCache[oldId];
+
+  // Keep an in-progress session pointed at the right id, just in case
+  if (_currentGame === oldId) _currentGame = newId;
+
+  // Supabase: drop the old row so it doesn't linger as a duplicate once
+  // the renamed entry syncs up under its new game_id. Same Supabase-only,
+  // never-touches-Dropbox scope as deleteFromCloudLibrary() everywhere else.
+  deleteFromCloudLibrary(oldId).catch(() => {});
+  if (_isPremium) syncLibraryToCloud().catch(() => {});
+
+  renderLibrary();
+  renderRecentlyPlayed();
+  // Re-render the open detail overlay under the new name — this also
+  // calls getCoverArt(newName, core) fresh, which is now guaranteed to
+  // miss the cache and actually hit the worker.
+  if (_detailGame && _detailGame.core === core && makeId(_detailGame.name, core) === oldId) {
+    openGameDetail(newName, core, _detailGame.sysLabel);
+  }
+  showToast('✓ Renamed — refetching cover art…');
+}
+
 function fmtPlayTime(secs) {
   if (!secs || secs < 60) return secs ? secs + 's' : null;
   if (secs < 3600) return Math.floor(secs / 60) + 'm';
@@ -3795,6 +3909,7 @@ async function openGameDetail(name, core, sysLabel) {
       <div class="detail-actions">
         <button class="detail-play-btn" onclick='libPlayFromDB(${JSON.stringify(name)},${JSON.stringify(core)},${JSON.stringify(sysLabel)});closeGameDetail()'>▶ Play</button>
         <button class="detail-icon-btn ${isFav?'on':''}" id="detail-fav-btn" onclick='detailToggleFav()' title="Favourite">${isFav?'★':'☆'}</button>
+        <button class="detail-icon-btn" onclick='renameGame(${JSON.stringify(name)},${JSON.stringify(core)})' title="Rename">✏️</button>
         <button class="detail-icon-btn" onclick='promptManualArt(${JSON.stringify(name)},${JSON.stringify(core)}).then(refreshDetailArt)' title="Set cover art">🖼️</button>
         <button class="detail-icon-btn danger" onclick='detailRemoveGame()' title="Remove">🗑️</button>
       </div>
@@ -5858,7 +5973,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260827083233';
+const APP_VERSION = '20260828204515';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -6378,6 +6493,27 @@ async function syncLibraryToCloud() {
     console.log('[Sync] Library synced', entries.length, 'entries');
   } catch(e) {
     console.warn('[Sync] Library sync failed:', e);
+  }
+}
+
+// Removes a single game's row from Supabase — the counterpart to the
+// upsert above. Needed because syncLibraryToCloud() only ever pushes;
+// without this, a game deleted locally stays in library_metadata forever
+// and restoreLibraryFromCloud() resurrects it on the next login/device.
+//
+// This ONLY ever touches the library_metadata row (name/playtime/favourite
+// bookkeeping). It never touches the user's own Dropbox ROM or save-state
+// files — those are the user's storage to manage directly in Dropbox if
+// they want them gone; unlike Supabase, they don't need us to do it for
+// them, since they can't log into Supabase themselves to clean it up.
+async function deleteFromCloudLibrary(gameId) {
+  if (!_isPremium || !_currentUser || !_supabase) return;
+  try {
+    await _supabase.from('library_metadata').delete()
+      .eq('user_id', _currentUser.id)
+      .eq('game_id', gameId);
+  } catch(e) {
+    console.warn('[Sync] Cloud delete failed:', e);
   }
 }
 
