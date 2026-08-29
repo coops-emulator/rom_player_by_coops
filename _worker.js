@@ -6,34 +6,99 @@
 const DROPBOX_APP_KEY  = 'kgy1xf57bh26gsi';
 const DROPBOX_REDIRECT = 'https://romplayerbycoops.pages.dev/';
 const SUPABASE_URL     = 'https://lsgtujvneyouihoivgyy.supabase.co';
+// Public anon key — safe to embed, same one shipped in index.html.
+// Used ONLY to validate a caller-supplied access token against Supabase
+// Auth; it grants no elevated privileges on its own.
+const SUPABASE_ANON    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxzZ3R1anZuZXlvdWlob2l2Z3l5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwOTgwMTIsImV4cCI6MjEwMDY3NDAxMn0.7Qbc1E8ygwUkiEPqugJS3i0vWNkWBrKrPW2ms1VCe6w';
 
-const CORS = {
-  'Access-Control-Allow-Origin':  '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Content-Type': 'application/json',
-};
+// Only these origins may call the state-changing endpoints below.
+// Add a local dev origin here temporarily if you need to test locally
+// (e.g. 'http://localhost:8788'), then remove it before shipping.
+const ALLOWED_ORIGINS = new Set([
+  'https://romplayerbycoops.pages.dev',
+]);
 
-const json = (data, status = 200) =>
+function corsHeaders(request) {
+  const origin = request.headers.get('Origin');
+  const allow = origin && ALLOWED_ORIGINS.has(origin) ? origin : 'null';
+  return {
+    'Access-Control-Allow-Origin':  allow,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Content-Type': 'application/json',
+    'Vary': 'Origin',
+  };
+}
+
+const json = (data, status, CORS) =>
   new Response(JSON.stringify(data), { status, headers: CORS });
 
-const cors204 = () =>
+const cors204 = (CORS) =>
   new Response(null, { status: 204, headers: CORS });
+
+// ══════════════════════════════════════════════════════
+// Auth — verify the caller's Supabase access token ourselves.
+// NEVER trust a client-supplied userId. The only identity we ever
+// act on is whatever Supabase's own Auth server hands back for the
+// bearer token actually presented on this request.
+// ══════════════════════════════════════════════════════
+async function verifyUser(request) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  if (!token) return null;
+
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: {
+        'apikey': SUPABASE_ANON,
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    if (!r.ok) return null;
+    const user = await r.json();
+    if (!user || !user.id) return null;
+    return user; // { id, email, ... }
+  } catch (e) {
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// Minimal best-effort rate limiting.
+// Real protection should also come from a Cloudflare Rate Limiting
+// rule on /redeem-code and /check-premium in the dashboard — that
+// enforces at the edge across all isolates. This KV-backed check is
+// a defense-in-depth backstop and only activates if a KV namespace
+// named RATE_LIMIT is bound; it no-ops otherwise so nothing breaks
+// if that binding isn't set up yet.
+// ══════════════════════════════════════════════════════
+async function rateLimited(env, key, limit, windowSeconds) {
+  if (!env.RATE_LIMIT) return false; // KV not bound — skip, rely on dashboard rule
+  const k = `rl:${key}`;
+  const current = parseInt((await env.RATE_LIMIT.get(k)) || '0', 10);
+  if (current >= limit) return true;
+  await env.RATE_LIMIT.put(k, String(current + 1), { expirationTtl: windowSeconds });
+  return false;
+}
+
+function clientIp(request) {
+  return request.headers.get('CF-Connecting-IP') || 'unknown';
+}
 
 // ══════════════════════════════════════════════════════
 // Dropbox OAuth proxy
 // ══════════════════════════════════════════════════════
-async function handleDropboxAuth(request) {
-  if (request.method === 'OPTIONS') return cors204();
-  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+async function handleDropboxAuth(request, CORS) {
+  if (request.method === 'OPTIONS') return cors204(CORS);
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, CORS);
 
   let body;
   try { body = await request.json(); }
-  catch (_) { return json({ error: 'Invalid JSON' }, 400); }
+  catch (_) { return json({ error: 'Invalid JSON' }, 400, CORS); }
 
   if (body.action === 'exchange') {
     const { code, verifier } = body;
-    if (!code || !verifier) return json({ error: 'Missing code or verifier' }, 400);
+    if (!code || !verifier) return json({ error: 'Missing code or verifier' }, 400, CORS);
     const r = await fetch('https://api.dropbox.com/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -44,13 +109,13 @@ async function handleDropboxAuth(request) {
     });
     const data = await r.json();
     if (!r.ok || !data.access_token)
-      return json({ error: data.error_description || 'Token exchange failed' }, 400);
-    return json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
+      return json({ error: data.error_description || 'Token exchange failed' }, 400, CORS);
+    return json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in }, 200, CORS);
   }
 
   if (body.action === 'refresh') {
     const { refresh_token } = body;
-    if (!refresh_token) return json({ error: 'Missing refresh_token' }, 400);
+    if (!refresh_token) return json({ error: 'Missing refresh_token' }, 400, CORS);
     const r = await fetch('https://api.dropbox.com/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -60,29 +125,40 @@ async function handleDropboxAuth(request) {
     });
     const data = await r.json();
     if (!r.ok || !data.access_token)
-      return json({ error: data.error_description || 'Token refresh failed' }, 401);
-    return json({ access_token: data.access_token, expires_in: data.expires_in });
+      return json({ error: data.error_description || 'Token refresh failed' }, 401, CORS);
+    return json({ access_token: data.access_token, expires_in: data.expires_in }, 200, CORS);
   }
 
-  return json({ error: 'Unknown action' }, 400);
+  return json({ error: 'Unknown action' }, 400, CORS);
 }
 
 // ══════════════════════════════════════════════════════
-// Redeem code — single use, grants permanent premium
+// Redeem code — single use, grants permanent premium.
+// Identity comes ONLY from the verified access token — a client can
+// no longer redeem a code onto an arbitrary userId of its choosing.
 // ══════════════════════════════════════════════════════
-async function handleRedeemCode(request, env) {
-  if (request.method === 'OPTIONS') return cors204();
-  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+async function handleRedeemCode(request, env, CORS) {
+  if (request.method === 'OPTIONS') return cors204(CORS);
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, CORS);
 
   if (!env.SUPABASE_SERVICE_KEY)
-    return json({ error: 'Server misconfiguration — SUPABASE_SERVICE_KEY not set' }, 500);
+    return json({ error: 'Server misconfiguration — SUPABASE_SERVICE_KEY not set' }, 500, CORS);
 
-  let codeHash, userId;
-  try { ({ codeHash, userId } = await request.json()); }
-  catch (_) { return json({ error: 'Invalid JSON' }, 400); }
+  const user = await verifyUser(request);
+  if (!user) return json({ error: 'Sign in required' }, 401, CORS);
+  const userId = user.id;
 
-  if (!codeHash || !userId)
-    return json({ error: 'Missing codeHash or userId' }, 400);
+  if (await rateLimited(env, `redeem:${clientIp(request)}`, 10, 60))
+    return json({ error: 'Too many attempts — try again in a minute' }, 429, CORS);
+  if (await rateLimited(env, `redeem:user:${userId}`, 10, 60))
+    return json({ error: 'Too many attempts — try again in a minute' }, 429, CORS);
+
+  let codeHash;
+  try { ({ codeHash } = await request.json()); }
+  catch (_) { return json({ error: 'Invalid JSON' }, 400, CORS); }
+
+  if (!codeHash || typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/i.test(codeHash))
+    return json({ error: 'Missing or malformed codeHash' }, 400, CORS);
 
   const sb = {
     'Content-Type': 'application/json',
@@ -99,13 +175,13 @@ async function handleRedeemCode(request, env) {
   const rows = await lookupRes.json();
 
   if (!Array.isArray(rows) || rows.length === 0)
-    return json({ error: 'Code not found' }, 404);
+    return json({ error: 'Code not found' }, 404, CORS);
 
   const row = rows[0];
 
   // Already used by someone else
   if (row.used_by && row.used_by !== userId)
-    return json({ error: 'Code already used' }, 409);
+    return json({ error: 'Code already used' }, 409, CORS);
 
   // If already used by this same user — still grant premium (idempotent)
   if (!row.used_by) {
@@ -121,7 +197,7 @@ async function handleRedeemCode(request, env) {
     const marked = await markRes.json();
     // If nothing was updated, someone else just used it simultaneously
     if (!Array.isArray(marked) || marked.length === 0)
-      return json({ error: 'Code already used' }, 409);
+      return json({ error: 'Code already used' }, 409, CORS);
   }
 
   // 3. Grant premium — upsert so it works even if profile row doesn't exist yet
@@ -137,24 +213,28 @@ async function handleRedeemCode(request, env) {
   if (!grantRes.ok) {
     const err = await grantRes.text();
     console.error('[redeem] grantPremium failed:', err);
-    return json({ error: 'Failed to grant premium — try again' }, 500);
+    return json({ error: 'Failed to grant premium — try again' }, 500, CORS);
   }
 
-  return json({ ok: true });
+  return json({ ok: true }, 200, CORS);
 }
 
 // ══════════════════════════════════════════════════════
-// Check premium — service key bypasses RLS entirely
+// Check premium — service key bypasses RLS entirely.
+// Identity comes ONLY from the verified access token — a client can
+// no longer ask "is user X premium?" for an arbitrary X.
 // ══════════════════════════════════════════════════════
-async function handleCheckPremium(request, env) {
-  if (request.method === 'OPTIONS') return cors204();
-  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
-  if (!env.SUPABASE_SERVICE_KEY) return json({ error: 'Misconfigured' }, 500);
+async function handleCheckPremium(request, env, CORS) {
+  if (request.method === 'OPTIONS') return cors204(CORS);
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, CORS);
+  if (!env.SUPABASE_SERVICE_KEY) return json({ error: 'Misconfigured' }, 500, CORS);
 
-  let userId;
-  try { ({ userId } = await request.json()); }
-  catch (_) { return json({ error: 'Invalid JSON' }, 400); }
-  if (!userId) return json({ error: 'Missing userId' }, 400);
+  const user = await verifyUser(request);
+  if (!user) return json({ error: 'Sign in required' }, 401, CORS);
+  const userId = user.id;
+
+  if (await rateLimited(env, `checkprem:${clientIp(request)}`, 60, 60))
+    return json({ error: 'Too many requests' }, 429, CORS);
 
   const sb = {
     'Content-Type': 'application/json',
@@ -175,10 +255,10 @@ async function handleCheckPremium(request, env) {
       headers: { ...sb, 'Prefer': 'return=minimal' },
       body: JSON.stringify({ id: userId, is_premium: false }),
     });
-    return json({ is_premium: false });
+    return json({ is_premium: false }, 200, CORS);
   }
 
-  return json({ is_premium: rows[0].is_premium || false });
+  return json({ is_premium: rows[0].is_premium || false }, 200, CORS);
 }
 
 // ══════════════════════════════════════════════════════
@@ -284,15 +364,15 @@ function cleanForSearch(raw) {
   return n;
 }
 
-async function handleCoverArt(request, env) {
-  if (request.method === 'OPTIONS') return cors204();
+async function handleCoverArt(request, env, CORS) {
+  if (request.method === 'OPTIONS') return cors204(CORS);
   if (!env.IGDB_CLIENT_ID || !env.IGDB_CLIENT_SECRET)
-    return json({ error: 'IGDB not configured' }, 500);
+    return json({ error: 'IGDB not configured' }, 500, CORS);
 
   const url = new URL(request.url);
   const name = url.searchParams.get('name');
   const core = url.searchParams.get('core');
-  if (!name || !core) return json({ error: 'Missing name or core' }, 400);
+  if (!name || !core) return json({ error: 'Missing name or core' }, 400, CORS);
 
   const platformId = IGDB_PLATFORM[core];
 
@@ -305,7 +385,7 @@ async function handleCoverArt(request, env) {
     };
 
     const cleanName = cleanForSearch(name);
-    if (!cleanName) return json({ error: 'Empty name after cleaning' }, 400);
+    if (!cleanName) return json({ error: 'Empty name after cleaning' }, 400, CORS);
 
     // Build search queries — platform-specific first, then broad fallback
     // Also try article-swapped version: "Legend of Zelda, The" → "The Legend of Zelda"
@@ -345,26 +425,26 @@ async function handleCoverArt(request, env) {
       if (bestScore < 2) break;
     }
 
-    if (!bestImageId) return json({ error: 'Not found' }, 404);
+    if (!bestImageId) return json({ error: 'Not found' }, 404, CORS);
 
     // Return the image directly — Cloudflare caches at edge for 30 days
     const imgUrl = `https://images.igdb.com/igdb/image/upload/t_cover_big/${bestImageId}.jpg`;
     const imgRes = await fetch(imgUrl);
-    if (!imgRes.ok) return json({ error: 'Image fetch failed' }, 502);
+    if (!imgRes.ok) return json({ error: 'Image fetch failed' }, 502, CORS);
 
     return new Response(imgRes.body, {
       status: 200,
       headers: {
         'Content-Type': 'image/jpeg',
         'Cache-Control': 'public, max-age=2592000',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': CORS['Access-Control-Allow-Origin'],
         'X-Cover-Score': String(bestScore),
       },
     });
 
   } catch(e) {
     console.error('[cover-art]', e.message);
-    return json({ error: 'Internal error' }, 500);
+    return json({ error: 'Internal error' }, 500, CORS);
   }
 }
 
@@ -374,18 +454,25 @@ async function handleCoverArt(request, env) {
 export default {
   async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
+    const CORS = corsHeaders(request);
 
+    // /functions/* paths are kept only so any old cached/bookmarked
+    // client build that still calls them keeps working — they route
+    // to the exact same hardened handlers, not to functions/redeem-code.js
+    // (that file is legacy Cloudflare Pages Functions format, unused
+    // and unreachable while this _worker.js exists at the repo root;
+    // remove it from the repo to avoid confusion).
     if (pathname === '/dropbox-auth' || pathname === '/functions/dropbox-auth')
-      return handleDropboxAuth(request);
+      return handleDropboxAuth(request, CORS);
 
     if (pathname === '/redeem-code' || pathname === '/functions/redeem-code')
-      return handleRedeemCode(request, env);
+      return handleRedeemCode(request, env, CORS);
 
     if (pathname === '/check-premium')
-      return handleCheckPremium(request, env);
+      return handleCheckPremium(request, env, CORS);
 
     if (pathname === '/cover-art')
-      return handleCoverArt(request, env);
+      return handleCoverArt(request, env, CORS);
 
     return env.ASSETS.fetch(request);
   }

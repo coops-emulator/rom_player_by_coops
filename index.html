@@ -2362,7 +2362,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260829063948"></script>
+<script src="emulator-backbone.js?v=20260829080830"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6004,7 +6004,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260829063948';
+const APP_VERSION = '20260829080830';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -6304,12 +6304,18 @@ let _supabase = null;
 let _currentUser = null;
 let _isPremium = false;
 let _authMode = 'signup';
+// The live Supabase access token for the current session. Sent as a
+// Bearer header to our own /check-premium and /redeem-code endpoints
+// so THEY verify who we are server-side — we never ask the server to
+// just trust a userId value we hand it from the client.
+let _accessToken = null;
 
 function initSupabase() {
   try {
     _supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
     _supabase.auth.onAuthStateChange(async (event, session) => {
       _currentUser = session?.user || null;
+      _accessToken = session?.access_token || null;
       await _refreshPremiumState();
       _updatePremiumUI();
     });
@@ -6317,6 +6323,7 @@ function initSupabase() {
     // Small delay ensures the auth token is attached before we query profiles.
     _supabase.auth.getSession().then(async ({ data }) => {
       _currentUser = data.session?.user || null;
+      _accessToken = data.session?.access_token || null;
       if (_currentUser) {
         await _refreshPremiumState();
         _updatePremiumUI();
@@ -6328,13 +6335,19 @@ function initSupabase() {
 }
 
 async function _refreshPremiumState() {
-  if (!_currentUser) { _isPremium = false; return; }
+  if (!_currentUser || !_accessToken) { _isPremium = false; return; }
   try {
-    // Use worker endpoint with service key — bypasses RLS completely
+    // Worker verifies _accessToken itself against Supabase Auth and
+    // derives the user id from THAT — it ignores any userId we might
+    // send, so tampering with a client-side variable can't change
+    // whose premium status gets checked.
     const r = await fetch('/check-premium', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: _currentUser.id }),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + _accessToken,
+      },
+      body: JSON.stringify({}),
     });
     if (r.ok) {
       const data = await r.json();
@@ -6361,6 +6374,44 @@ async function _refreshPremiumState() {
   }
 }
 let _cloudRestoreDone = false;
+
+/* ══ PREMIUM RECONCILIATION ═════════════════════════════
+   _isPremium is a plain JS variable, which means it can always be
+   set directly in the console (this is true of any web app — the
+   browser gives page JS and devtools console the same privileges).
+   Nothing that costs real money trusts this variable — cloud sync
+   and redeem codes are enforced server-side/DB-side regardless of
+   what this says. But local-only UI (theme unlocks, save-slot
+   count) reads it directly, since there's no server round-trip to
+   gate for something that never leaves the browser.
+   To shrink the window where a faked value does anything, we
+   silently re-fetch the real value from the server on an interval
+   and on tab refocus, then re-run _updatePremiumUI() to stomp any
+   tampered UI back to the truth — so a console hack survives at
+   most a few seconds, not the whole session.
+════════════════════════════════════════════════════════ */
+const PREMIUM_RECHECK_MS = 2000;
+setInterval(() => {
+  if (_currentUser && _accessToken) {
+    _refreshPremiumState().then(_updatePremiumUI);
+  }
+}, PREMIUM_RECHECK_MS);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && _currentUser && _accessToken) {
+    _refreshPremiumState().then(_updatePremiumUI);
+  }
+});
+// Also reconcile right before the moments someone would actually try to
+// use a faked premium feature, not just on the timer — so opening the
+// themes panel or settings never shows stale/tampered status even in
+// the gap between two timer ticks.
+['premium-themes-toggle', 'tab-signin-btn'].forEach(id => {
+  document.addEventListener('click', (e) => {
+    if (e.target.closest && e.target.closest('#' + id) && _currentUser && _accessToken) {
+      _refreshPremiumState().then(_updatePremiumUI);
+    }
+  }, true);
+});
 
 /* ══ CLOUD PREFS SYNC ══════════════════════════════════
    Saves username, theme, custom theme, lib sort, and
@@ -6965,18 +7016,29 @@ async function _processRedeem(inp) {
   const code = inp.value.trim().toUpperCase();
   if (!code) return showToast('Enter a redeem code first');
 
+  if (!_accessToken) {
+    showToast('Your session expired — sign in again and retry');
+    return;
+  }
   const hash = await _sha256(code);
 
   try {
-    const r = await fetch('/functions/redeem-code', {
+    // Worker verifies the Bearer token itself and redeems onto THAT
+    // user — it no longer trusts a userId field from the client.
+    const r = await fetch('/redeem-code', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ codeHash: hash, userId: _currentUser.id })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + _accessToken,
+      },
+      body: JSON.stringify({ codeHash: hash })
     });
     const data = await r.json();
     if (!r.ok) {
+      if (r.status === 401) return showToast('Your session expired — sign in again and retry');
       if (r.status === 404) return showToast('❌ Invalid code — check and try again');
       if (r.status === 409) return showToast('❌ This code has already been used');
+      if (r.status === 429) return showToast('❌ Too many attempts — wait a minute and try again');
       return showToast('❌ ' + (data.error || 'Something went wrong'));
     }
     // Re-read premium status from DB so it persists across sessions
