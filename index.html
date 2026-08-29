@@ -2362,7 +2362,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260828204515"></script>
+<script src="emulator-backbone.js?v=20260829063948"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -4148,11 +4148,42 @@ function closeRelaunchModal() {
 }
 document.getElementById('relaunch-inp').addEventListener('change', async function(e) {
   const file = e.target.files[0]; if (!file || !_pendingRelaunch) return;
+  const pending = _pendingRelaunch;
   closeRelaunchModal();
   const ext = file.name.split('.').pop().toLowerCase();
   const sys = await resolveSysForExt(ext);
   if (!sys) { if (!AMBIGUOUS_EXT[ext]) showErr('Unsupported format.'); return; }
-  launch(URL.createObjectURL(file), sys, _pendingRelaunch.name, file);
+
+  // This modal only ever fires for a game that already has a library
+  // entry but no ROM bytes on this device (e.g. its metadata synced down
+  // via restoreLibraryFromCloud() from another device, but the ROM
+  // binary itself never did — Supabase sync is metadata-only). Persist
+  // the re-picked file to OPFS now, the same way libPlayFromDB() already
+  // does for its Dropbox-download fallback, so this device has it locally
+  // and doesn't have to ask again on the next play. Use pending.core (the
+  // entry's actual, already-known core) rather than the extension-guessed
+  // sys.core, so the id this is filed under is guaranteed to match the
+  // existing library record instead of depending on guess-matching them.
+  const id = makeId(pending.name, pending.core);
+  const opfsFilename = 'rom_' + id.replace(/[^a-zA-Z0-9_]/g,'_') + '.' + ext;
+  try {
+    const buf = await file.arrayBuffer();
+    await opfsWrite(opfsFilename, buf);
+    const meta = await dbGet(META_STORE, id).catch(() => null);
+    if (meta) {
+      meta.romInOpfs = true;
+      meta.opfsFilename = opfsFilename;
+      meta.hasRom = true;
+      meta.fileSizeKB = Math.round(file.size / 1024);
+      await dbPut(META_STORE, meta);
+      showToast('✓ Saved to this device — no need to re-select next time');
+    }
+  } catch(err) {
+    console.warn('[Storage] Could not persist re-selected ROM to OPFS — will need to re-select again next time:', err);
+    // Non-fatal — fall through and play from the in-memory file this session.
+  }
+
+  launch(URL.createObjectURL(file), sys, pending.name, file);
 });
 document.getElementById('relaunch-modal').addEventListener('click', function(e) {
   if (e.target === this) closeRelaunchModal();
@@ -5973,7 +6004,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260828204515';
+const APP_VERSION = '20260829063948';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
