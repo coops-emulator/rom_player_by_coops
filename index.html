@@ -2362,7 +2362,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260829080830"></script>
+<script src="emulator-backbone.js?v=20260829081624"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6004,7 +6004,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260829080830';
+const APP_VERSION = '20260829081624';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -6391,15 +6391,26 @@ let _cloudRestoreDone = false;
    most a few seconds, not the whole session.
 ════════════════════════════════════════════════════════ */
 const PREMIUM_RECHECK_MS = 2000;
-setInterval(() => {
+function _reconcilePremium() {
   if (_currentUser && _accessToken) {
+    // Signed in — ask the server what's actually true and apply it.
     _refreshPremiumState().then(_updatePremiumUI);
+  } else if (_isPremium) {
+    // Not signed in at all — there is no valid session for _isPremium
+    // to be true under, so any true value here is definitionally a
+    // tampered one (this was the actual gap: previously we only
+    // reconciled when a session existed, so a console hack with no
+    // sign-in at all never got checked against anything and could
+    // sit at true indefinitely). Force it off immediately, no
+    // network round-trip needed since "not signed in" already
+    // proves it's invalid.
+    _isPremium = false;
+    _updatePremiumUI();
   }
-}, PREMIUM_RECHECK_MS);
+}
+setInterval(_reconcilePremium, PREMIUM_RECHECK_MS);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && _currentUser && _accessToken) {
-    _refreshPremiumState().then(_updatePremiumUI);
-  }
+  if (document.visibilityState === 'visible') _reconcilePremium();
 });
 // Also reconcile right before the moments someone would actually try to
 // use a faked premium feature, not just on the timer — so opening the
@@ -6407,8 +6418,8 @@ document.addEventListener('visibilitychange', () => {
 // the gap between two timer ticks.
 ['premium-themes-toggle', 'tab-signin-btn'].forEach(id => {
   document.addEventListener('click', (e) => {
-    if (e.target.closest && e.target.closest('#' + id) && _currentUser && _accessToken) {
-      _refreshPremiumState().then(_updatePremiumUI);
+    if (e.target.closest && e.target.closest('#' + id)) {
+      _reconcilePremium();
     }
   }, true);
 });
