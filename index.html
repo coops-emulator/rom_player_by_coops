@@ -1553,14 +1553,24 @@ body.pseudo-fullscreen-active {
 /* The game canvas fills everything — uses dvh/dvw so it accounts for
    Safari's dynamic toolbar collapsing in landscape. Safe-area insets
    handle the notch/Dynamic Island on iPhone. */
+/* !important on width/height/min-height/max-height here is deliberate:
+   applyGameHolderHeight() sets an inline height/min-height directly on
+   #game-holder for the Medium/Large/Custom presets (e.g. height:720px),
+   and inline styles beat any non-!important stylesheet rule regardless
+   of selector. Without this, rotating to landscape only actually filled
+   the screen when Mobile or Fill happened to be selected — those are the
+   only two presets that clear the inline height themselves — while
+   Medium/Large/Custom stayed pinned at their fixed pixel height inside
+   the fullscreen backdrop. This now wins unconditionally, for every
+   preset, regardless of how fullscreen was entered. */
 body.pseudo-fullscreen-active #game-holder {
   position: fixed;
   top: env(safe-area-inset-top, 0px);
   left: env(safe-area-inset-left, 0px);
   right: env(safe-area-inset-right, 0px);
   bottom: env(safe-area-inset-bottom, 0px);
-  width: auto; height: auto;
-  min-height: 0;
+  width: auto !important; height: auto !important;
+  min-height: 0 !important; max-height: none !important;
   z-index: 9000;
   border-radius: 0;
   box-shadow: none;
@@ -1571,6 +1581,16 @@ body.pseudo-fullscreen-active #game-holder {
   /* No transition — instant snap feels correct on orientation change */
   transition: none;
   touch-action: none;
+}
+
+/* Same override for NATIVE fullscreen (desktop/Android via
+   requestFullscreen()) — the browser's own :fullscreen UA-stylesheet
+   sizing has normal specificity too, so it's just as vulnerable to the
+   same inline-style-wins problem as the pseudo-fullscreen path above. */
+#game-holder:fullscreen,
+#game-holder:-webkit-full-screen {
+  width: 100% !important; height: 100% !important;
+  min-height: 0 !important; max-height: none !important;
 }
 
 /* In true landscape on iPhone the safe-area insets cover the notch zone
@@ -2362,7 +2382,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260829081624"></script>
+<script src="emulator-backbone.js?v=20260829114727"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -2945,18 +2965,23 @@ function saveCustomTheme() {
 ══════════════════════════════════════════════════════ */
 const SIZE_MAP = { mobile: 0, medium: 600, large: 720, fill: 0 };
 
-// Default to 'mobile' on narrow screens, 'medium' on desktop
+// Default to 'mobile' on narrow screens, 'medium' on desktop.
+// Deliberately NOT persisted anywhere (localStorage/IDB/cloud) — size is a
+// per-session preference the user can freely change any time, not
+// something that needs to survive a reload. It used to be persisted via
+// prefSet()/localStorage + synced through profiles.user_prefs, but the
+// cloud-restore path (see restorePrefsFromCloud) applied it unconditionally
+// on every sign-in with no "did the user already change this locally"
+// guard — so ~1s after every login it would silently snap back to
+// whatever was last synced, which looked like "you can only pick one
+// size." Simplest correct fix: there's nothing left to restore.
 const _isMobileScreen = () => window.innerWidth <= 480;
-let _currentSize = localStorage.getItem('rp-size') || (_isMobileScreen() ? 'mobile' : 'medium');
-let _customHeight = parseInt(localStorage.getItem('rp-custom-height')) || 0;
+let _currentSize = _isMobileScreen() ? 'mobile' : 'medium';
+let _customHeight = 0;
 
 function applySize(name) {
   _currentSize = name;
   _customHeight = 0;
-  localStorage.setItem('rp-size', name);
-  localStorage.removeItem('rp-custom-height');
-  prefSet('rp-size', name);
-  prefSet('rp-custom-height', 0);
   applyGameHolderHeight();
   renderSizeOptions();
   const inp = document.getElementById('custom-height');
@@ -2968,10 +2993,6 @@ function applyCustomSize(val) {
   if (!px || px < 200) return;
   _customHeight = px;
   _currentSize = 'custom';
-  localStorage.setItem('rp-size', 'custom');
-  localStorage.setItem('rp-custom-height', px);
-  prefSet('rp-size', 'custom');
-  prefSet('rp-custom-height', String(px));
   applyGameHolderHeight();
   renderSizeOptions();
 }
@@ -3077,15 +3098,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const savedTheme  = await prefGet('rp-theme', localStorage.getItem('rp-theme') || 'default');
   const savedCustom = await prefGet('rp-custom-theme', localStorage.getItem('rp-custom-theme') || null);
-  const savedSize   = await prefGet('rp-size', localStorage.getItem('rp-size') || null);
-  const savedHeight = await prefGet('rp-custom-height', localStorage.getItem('rp-custom-height') || null);
   if (savedCustom) {
     const s = typeof savedCustom === 'string' ? savedCustom : JSON.stringify(savedCustom);
     localStorage.setItem('rp-custom-theme', s);
   }
   if (savedTheme) { localStorage.setItem('rp-theme', savedTheme); _currentTheme = savedTheme; }
-  if (savedSize)  { localStorage.setItem('rp-size', savedSize); _currentSize = savedSize; }
-  if (savedHeight){ localStorage.setItem('rp-custom-height', String(savedHeight)); _customHeight = parseInt(savedHeight)||0; }
   applyTheme(savedTheme || _currentTheme, true);
   applyGameHolderHeight();
   renderRecentlyPlayed();
@@ -6004,7 +6021,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260829081624';
+const APP_VERSION = '20260829114727';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -6429,6 +6446,9 @@ document.addEventListener('visibilitychange', () => {
    favourites into profiles.user_prefs (JSONB).
    Works for ALL logged-in users (free + premium).
    Supabase RLS ensures users can only read/write their own row.
+   Player size is deliberately NOT included — it's a per-session choice,
+   not something that should follow you across devices/reloads (see the
+   comment on _currentSize's declaration for why).
 ════════════════════════════════════════════════════ */
 async function savePrefsToCloud() {
   if (!_currentUser || !_supabase) return;
@@ -6439,8 +6459,6 @@ async function savePrefsToCloud() {
       customTheme:  customThemeRaw ? JSON.parse(customThemeRaw) : null,
       libSort:      _libSort || 'lastPlayed',
       username:     window._cachedUsername || null,
-      size:         localStorage.getItem('rp-size') || null,
-      customHeight: localStorage.getItem('rp-custom-height') || null,
       savedAt:      Date.now(),
     };
     await _supabase.from('profiles').upsert({
@@ -6491,18 +6509,6 @@ async function restorePrefsFromCloud() {
       await prefSet('rp-lib-sort', p.libSort);
       const sortSel = document.getElementById('lib-sort-select');
       if (sortSel) sortSel.value = p.libSort;
-    }
-    // Size
-    if (p.size) {
-      localStorage.setItem('rp-size', p.size);
-      await prefSet('rp-size', p.size);
-      _currentSize = p.size;
-      if (p.customHeight) {
-        localStorage.setItem('rp-custom-height', p.customHeight);
-        await prefSet('rp-custom-height', p.customHeight);
-        _customHeight = parseInt(p.customHeight) || 0;
-      }
-      applyGameHolderHeight();
     }
     console.log('[Prefs] Cloud prefs restored');
   } catch(e) {
