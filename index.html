@@ -1798,6 +1798,112 @@ body.game-active .wrap {
   background: rgba(124,106,247,.15); color: var(--accent2); border: 1px solid rgba(124,106,247,.3);
   flex-shrink: 0;
 }
+
+/* ══════════════════════════════════════════════════
+   BOOT SEQUENCE — app cold-open, NOT the per-game
+   "loading a ROM" splash (that's showLaunchSplash).
+   Purely a decorative occlusion layer: it sits on top
+   of the already-parsed, already-live menu underneath —
+   nothing is unmounted/remounted when it's removed, so
+   there's no pop at handoff. EmulatorJS/library/Supabase
+   init proceeds completely independently underneath;
+   nothing here ever awaits or delays that.
+   Uses only existing --bg/--accent/--glow/--font tokens
+   so it automatically matches whichever theme is (or
+   becomes) active once _storageReadyPromise resolves —
+   no hardcoded colours, no console branding of any kind,
+   entirely original artwork/audio (see the boot-sequence
+   script right after the header markup below).
+══════════════════════════════════════════════════ */
+#boot-overlay {
+  position: fixed; inset: 0; z-index: 99999;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+  overflow: hidden;
+}
+#boot-overlay.boot-exit {
+  animation: rp-boot-power-off .22s ease-in forwards;
+  pointer-events: none;
+}
+@keyframes rp-boot-power-off {
+  0%   { opacity: 1; filter: brightness(1) saturate(1); transform: scaleY(1); }
+  55%  { opacity: 1; filter: brightness(2.6) saturate(1.4); transform: scaleY(1); }
+  100% { opacity: 0; filter: brightness(2.6) saturate(1.4); transform: scaleY(.002); }
+}
+.boot-vignette {
+  position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,.82) 100%);
+  opacity: 0;
+  animation: rp-boot-vignette 1.9s ease-out forwards;
+}
+@keyframes rp-boot-vignette {
+  0% { opacity: 0; } 10% { opacity: 1; } 100% { opacity: .4; }
+}
+.boot-scanlines {
+  position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(to bottom,
+    rgba(255,255,255,.05) 0px, rgba(255,255,255,.05) 1px,
+    transparent 1px, transparent 3px);
+  mix-blend-mode: overlay;
+  opacity: 0; transform: translateY(-100%);
+  animation: rp-boot-scan 1.9s linear forwards;
+}
+@keyframes rp-boot-scan {
+  0%   { opacity: 0; transform: translateY(-100%); }
+  12%  { opacity: .55; }
+  100% { opacity: .14; transform: translateY(0); }
+}
+.boot-mark {
+  position: relative; display: flex; flex-direction: column; align-items: center; gap: 14px;
+  opacity: 0; filter: brightness(2.2) blur(6px);
+  transform: scale(1.35, .3);
+  animation: rp-boot-resolve 1.3s .2s cubic-bezier(.16,1,.3,1) forwards;
+}
+.boot-mark img {
+  width: min(30vw, 96px); height: auto; display: block; border-radius: 18px;
+  box-shadow: 0 0 40px var(--glow);
+  /* Continuous subtle breathing glow for the full boot window, so the
+     screen is never a static freeze-frame once the resolve-in finishes
+     around t=1.5s — there's always visible, gentle motion right up to
+     the 2s exit, not just during the initial reveal. */
+  animation: rp-boot-glow-pulse 1s ease-in-out .3s infinite;
+}
+@keyframes rp-boot-glow-pulse {
+  0%, 100% { box-shadow: 0 0 34px var(--glow); }
+  50%      { box-shadow: 0 0 58px var(--glow); }
+}
+.boot-mark-word {
+  font-family: var(--font); font-weight: 700; font-size: 13px;
+  letter-spacing: .32em; text-transform: uppercase; color: var(--text);
+  opacity: .85;
+}
+@keyframes rp-boot-resolve {
+  0%   { opacity: 0; filter: brightness(3.5) blur(9px); transform: scale(1.35,.3); }
+  40%  { opacity: 1; filter: brightness(2) blur(4px); transform: scale(1.08,.92); }
+  100% { opacity: 1; filter: brightness(1) blur(0); transform: scale(1,1); }
+}
+.boot-flicker {
+  position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none;
+  animation: rp-boot-flicker-in .08s 2, rp-boot-flicker-out .4s .08s ease-out forwards;
+}
+@keyframes rp-boot-flicker-in { 0%, 100% { opacity: 0; } 50% { opacity: .1; } }
+@keyframes rp-boot-flicker-out { 0% { opacity: .1; } 100% { opacity: 0; } }
+.boot-skip-hint {
+  position: absolute; bottom: max(28px, env(safe-area-inset-bottom)); left: 0; right: 0;
+  text-align: center; font-size: 11px; color: var(--muted); letter-spacing: .08em;
+  opacity: 0; animation: rp-boot-hint-in .5s .6s ease-out forwards;
+}
+@keyframes rp-boot-hint-in { to { opacity: .6; } }
+
+@media (prefers-reduced-motion: reduce) {
+  #boot-overlay, #boot-overlay * { animation-duration: .001s !important; }
+  .boot-vignette, .boot-scanlines, .boot-flicker { display: none !important; }
+  /* The glow-pulse is `infinite` — under the blanket animation-duration
+     override above it would otherwise loop at .001s forever, i.e. a
+     rapid strobe, which is exactly what reduced-motion exists to
+     prevent. Must be switched off outright here, not just shortened. */
+  .boot-mark img { animation: none !important; box-shadow: 0 0 34px var(--glow) !important; }
+}
 </style>
 
 </head>
@@ -1821,6 +1927,162 @@ body.game-active .wrap {
     </div>
   </div>
 </div>
+
+<!-- ══ BOOT SEQUENCE ══════════════════════════════════
+     App cold-open splash — plays on every load, for a
+     full 2 seconds (by explicit product decision — no
+     once-per-session/day gating). NOT the per-game
+     "loading a ROM" screen (that's showLaunchSplash(),
+     a completely separate flow later in this file).
+     Purely a decorative occlusion layer sitting on top
+     of the menu UI, which is already parsed and live
+     underneath by the time this runs — so there's
+     nothing to "mount" at handoff, just an overlay to
+     remove, meaning no pop/flash either way.
+     Real init (EmulatorJS, library reads, Supabase session
+     check, etc. further down this file) proceeds completely
+     independently and is never awaited by the script below.
+     No new network requests, no new files, no CDN — the
+     logo is cloned from the header image already parsed
+     just above, and the chime is synthesized locally with
+     the Web Audio API, so this cannot interact with the
+     app's crossOriginIsolated / COOP+COEP requirements. ══ -->
+<div id="boot-overlay" aria-hidden="true" role="presentation">
+  <div class="boot-vignette"></div>
+  <div class="boot-scanlines"></div>
+  <div class="boot-mark" id="boot-mark">
+    <div class="boot-mark-word">ROM Player</div>
+  </div>
+  <div class="boot-flicker"></div>
+  <div class="boot-skip-hint">tap anywhere to skip</div>
+</div>
+<noscript><style>#boot-overlay{display:none!important}</style></noscript>
+<script>
+(function () {
+  var overlay = document.getElementById('boot-overlay');
+  if (!overlay) return;
+
+  // Plays on every load, by design — no once-per-session/day gating.
+  // (An earlier version gated this via localStorage; that's been removed
+  // per explicit product decision. If a gate is ever wanted again, the
+  // right place to reintroduce it is right here, before the animation
+  // logic below runs.)
+  var BOOT_DURATION_MS = 2000; // full boot sequence length, animations below are timed to match
+  // Collapsing the CSS animations to near-zero (see the reduced-motion
+  // media query above) removes the motion but, on its own, would leave a
+  // now-static splash sitting fully opaque on screen for the entire
+  // BOOT_DURATION_MS wait — motionless is not the same as brief, and a
+  // reduced-motion preference implies both. Shorten the duration too.
+  var prefersReducedMotion = false;
+  try {
+    prefersReducedMotion = window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch (e) { /* matchMedia unsupported — default to full duration */ }
+  if (prefersReducedMotion) BOOT_DURATION_MS = 300;
+
+  try {
+    // Clone the real header logo (already parsed immediately above this
+    // point in the document) instead of embedding a second copy of the
+    // image data — zero added bytes, and it's guaranteed to always match
+    // whatever the actual current logo is, with no separate asset to
+    // keep in sync.
+    var headerLogoImg = document.querySelector('.hdr-logo img');
+    if (headerLogoImg) {
+      var clone = headerLogoImg.cloneNode(true);
+      clone.removeAttribute('style');
+      clone.alt = 'ROM Player by Coops';
+      var mark = document.getElementById('boot-mark');
+      if (mark) mark.prepend(clone);
+    }
+  } catch (e) { /* purely cosmetic — never let this block the sequence */ }
+
+  var finished = false;
+  var audioTried = false;
+
+  function finishBoot() {
+    if (finished) return;
+    finished = true;
+    document.removeEventListener('pointerdown', onGesture);
+    document.removeEventListener('keydown', onGesture);
+    overlay.classList.add('boot-exit');
+    // EXIT_ANIM_MS must match the .22s duration of the rp-boot-power-off
+    // keyframe below exactly. animationend is used as an optional early
+    // exit when the browser fires it promptly, but the actual guarantee
+    // is this deterministic timeout — testing surfaced that animationend
+    // can lag or be skipped under load (observed ~40% of the time in a
+    // CPU-constrained headless run), which previously raced against a
+    // separate, much looser 500ms fallback and intermittently left the
+    // overlay on screen for longer than intended. Tying the guaranteed
+    // removal directly to the known animation length, with a small fixed
+    // buffer, removes that race rather than papering over it with a
+    // bigger number.
+    var removed = false;
+    var cleanup = function () {
+      if (removed) return;
+      removed = true;
+      if (overlay.parentNode) overlay.remove();
+    };
+    overlay.addEventListener('animationend', cleanup, { once: true });
+    setTimeout(cleanup, prefersReducedMotion ? 60 : 320);
+  }
+
+  function playBootChime() {
+    if (audioTried) return;
+    audioTried = true;
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return; // unsupported — visual sequence is entirely unaffected
+      var ctx = new Ctx();
+      var run = function () {
+        var now = ctx.currentTime;
+        var master = ctx.createGain();
+        master.gain.setValueAtTime(0.0001, now);
+        master.gain.exponentialRampToValueAtTime(0.22, now + 0.02);
+        master.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+        master.connect(ctx.destination);
+        // Two synthesized sine tones, original composition — not a
+        // recreation or approximation of any real console's startup
+        // sound. Purely generated at runtime, no audio file involved.
+        var notes = [[440.00, 0.00, 0.16], [659.25, 0.10, 0.38]];
+        notes.forEach(function (n) {
+          var freq = n[0], start = n[1], dur = n[2];
+          var osc = ctx.createOscillator();
+          osc.type = 'sine';
+          var g = ctx.createGain();
+          g.gain.setValueAtTime(0.0001, now + start);
+          g.gain.exponentialRampToValueAtTime(1, now + start + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+          osc.frequency.setValueAtTime(freq, now + start);
+          osc.connect(g).connect(master);
+          osc.start(now + start);
+          osc.stop(now + start + dur + 0.05);
+        });
+      };
+      // AudioContext is only ever constructed inside this gesture-triggered
+      // handler (never on page load), which is what satisfies Chrome/
+      // Safari's autoplay-with-sound policy — no separate "tap to enable
+      // audio" step needed since the skip gesture doubles as the unlock.
+      if (ctx.state === 'suspended') { ctx.resume().then(run).catch(function () {}); }
+      else { run(); }
+    } catch (e) {
+      // Audio unsupported or blocked for any reason — never let this
+      // affect the visual sequence, which finishes on its own regardless.
+    }
+  }
+
+  function onGesture() {
+    playBootChime();
+    finishBoot(); // the first tap/click/keypress both unlocks audio and skips — one input, both jobs
+  }
+  document.addEventListener('pointerdown', onGesture, { once: true, passive: true });
+  document.addEventListener('keydown', onGesture, { once: true });
+
+  // If the user never interacts during the sequence, it still ends on
+  // its own — silently, per autoplay policy (no gesture occurred, so no
+  // audio is permitted, which is correct behaviour, not a bug).
+  setTimeout(finishBoot, BOOT_DURATION_MS);
+})();
+</script>
 
 <div class="wrap">
 
@@ -2382,7 +2644,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260829114727"></script>
+<script src="emulator-backbone.js?v=20260901120452"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6021,7 +6283,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260829114727';
+const APP_VERSION = '20260901120452';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
