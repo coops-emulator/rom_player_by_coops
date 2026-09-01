@@ -164,56 +164,39 @@ async function handleRedeemCode(request, env, CORS) {
     'Content-Type': 'application/json',
     'apikey': env.SUPABASE_SERVICE_KEY,
     'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-    'Prefer': 'return=representation',
   };
 
-  // 1. Find the code
-  const lookupRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/redeem_codes?code_hash=eq.${encodeURIComponent(codeHash)}&select=id,used_by&limit=1`,
-    { headers: sb }
-  );
-  const rows = await lookupRes.json();
+  // Single atomic RPC — see supabase-hardening-addendum.sql's
+  // redeem_code() function. This replaces three sequential REST calls
+  // (lookup, mark-used, grant-premium) with one Postgres function call
+  // that runs as a single transaction: the row lock (`for update`)
+  // makes the claim race-free, and because everything happens inside
+  // one implicit transaction, a code can never end up marked "used"
+  // without profiles.is_premium actually getting set — a failure
+  // partway through rolls the whole thing back instead of leaving the
+  // code burned with nothing granted.
+  const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/redeem_code`, {
+    method: 'POST',
+    headers: sb,
+    body: JSON.stringify({ p_code_hash: codeHash, p_user_id: userId }),
+  });
 
-  if (!Array.isArray(rows) || rows.length === 0)
-    return json({ error: 'Code not found' }, 404, CORS);
-
-  const row = rows[0];
-
-  // Already used by someone else
-  if (row.used_by && row.used_by !== userId)
-    return json({ error: 'Code already used' }, 409, CORS);
-
-  // If already used by this same user — still grant premium (idempotent)
-  if (!row.used_by) {
-    // 2. Mark as used atomically
-    const markRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/redeem_codes?id=eq.${encodeURIComponent(row.id)}&used_by=is.null`,
-      {
-        method: 'PATCH',
-        headers: sb,
-        body: JSON.stringify({ used_by: userId, used_at: new Date().toISOString() }),
-      }
-    );
-    const marked = await markRes.json();
-    // If nothing was updated, someone else just used it simultaneously
-    if (!Array.isArray(marked) || marked.length === 0)
-      return json({ error: 'Code already used' }, 409, CORS);
+  if (!rpcRes.ok) {
+    const err = await rpcRes.text();
+    console.error('[redeem] redeem_code RPC failed:', err);
+    return json({ error: 'Something went wrong — try again' }, 500, CORS);
   }
 
-  // 3. Grant premium — upsert so it works even if profile row doesn't exist yet
-  const grantRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`,
-    {
-      method: 'PATCH',
-      headers: sb,
-      body: JSON.stringify({ is_premium: true, premium_source: 'redeem', updated_at: new Date().toISOString() }),
-    }
-  );
+  const result = await rpcRes.json();
 
-  if (!grantRes.ok) {
-    const err = await grantRes.text();
-    console.error('[redeem] grantPremium failed:', err);
-    return json({ error: 'Failed to grant premium — try again' }, 500, CORS);
+  if (!result || !result.ok) {
+    // Deliberately generic and identical whether the code doesn't
+    // exist at all or exists but was already used by someone else —
+    // no reason to hand an attacker a signal about which codes are
+    // real. (Not currently a practical brute-force risk given the
+    // code format's keyspace, but there's no reason to leave the
+    // distinction there either.)
+    return json({ error: 'Invalid or already-used code' }, 400, CORS);
   }
 
   return json({ ok: true }, 200, CORS);

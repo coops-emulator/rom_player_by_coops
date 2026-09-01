@@ -2644,7 +2644,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260901120452"></script>
+<script src="emulator-backbone.js?v=20260901203920"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6283,7 +6283,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260901120452';
+const APP_VERSION = '20260901203920';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -7315,10 +7315,11 @@ async function _processRedeem(inp) {
     const data = await r.json();
     if (!r.ok) {
       if (r.status === 401) return showToast('Your session expired — sign in again and retry');
-      if (r.status === 404) return showToast('❌ Invalid code — check and try again');
-      if (r.status === 409) return showToast('❌ This code has already been used');
       if (r.status === 429) return showToast('❌ Too many attempts — wait a minute and try again');
-      return showToast('❌ ' + (data.error || 'Something went wrong'));
+      // 400 covers both "code doesn't exist" and "already used by someone
+      // else" — deliberately not distinguished server-side anymore, see
+      // _worker.js's handleRedeemCode for why.
+      return showToast('❌ ' + (data.error || 'Invalid or already-used code'));
     }
     // Re-read premium status from DB so it persists across sessions
     await _refreshPremiumState();
