@@ -1033,8 +1033,47 @@ footer {
 }
 .detail-art-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .detail-title { font-size: 22px; font-weight: 800; color: var(--text); margin-bottom: 4px; }
-.detail-sub { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
-.detail-actions { display: flex; align-items: center; gap: 10px; }
+.detail-sub { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+
+/* Clean metadata chip row — release year / genre / developer / rating.
+   Free for every user; not gated behind premium. */
+.detail-meta-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-bottom: 10px; }
+.detail-meta-chips:empty { display: none; margin: 0; }
+.detail-chip {
+  font-size: 11px; font-weight: 600; padding: 5px 12px; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: 20px;
+  color: var(--muted); background: var(--surf2);
+}
+
+/* No-cover-art hint — only shown when IGDB has no match at all for the
+   name (not shown if a game matched but simply lacks boxart, since
+   renaming wouldn't fix that case). */
+.detail-art-hint {
+  display: none; font-size: 12px; line-height: 1.5; color: var(--muted);
+  margin: 0 0 16px; max-width: 340px;
+}
+.detail-art-hint a { color: var(--accent2); text-decoration: underline; cursor: pointer; }
+.detail-art-hint.show { display: block; }
+
+.detail-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+
+/* "About" card — genre/developer facts + summary, below the action row */
+.detail-info-card {
+  display: none; width: 100%; margin-top: 26px; text-align: left;
+  background: var(--surf2); border: 1px solid var(--border); border-radius: 16px;
+  padding: 18px 20px;
+}
+.detail-info-card.show { display: block; }
+.detail-info-heading {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); margin-bottom: 10px;
+}
+.detail-info-summary { font-size: 13.5px; line-height: 1.6; color: var(--text); margin: 0 0 14px; }
+.detail-info-facts { display: flex; flex-direction: column; gap: 8px; }
+.detail-info-facts:not(:first-child) { padding-top: 12px; border-top: 1px solid var(--border); }
+.detail-info-fact { display: flex; justify-content: space-between; gap: 14px; font-size: 12.5px; }
+.detail-info-fact-label { color: var(--muted); font-weight: 600; flex-shrink: 0; }
+.detail-info-fact-value { color: var(--text); text-align: right; }
 .detail-play-btn {
   background: var(--accent); color: #fff; border: none;
   border-radius: 14px; padding: 14px 32px; font-size: 15px; font-weight: 700;
@@ -1366,10 +1405,14 @@ footer {
   .detail-content { padding: 64px 16px 32px; }
   .detail-art-frame { width: 130px; margin-bottom: 16px; }
   .detail-title { font-size: 18px; }
-  .detail-sub { font-size: 12px; margin-bottom: 18px; }
+  .detail-sub { font-size: 12px; margin-bottom: 10px; }
+  .detail-chip { font-size: 10px; padding: 4px 10px; }
+  .detail-art-hint { font-size: 11px; }
   .detail-play-btn { padding: 12px 24px; font-size: 14px; }
   .detail-icon-btn { width: 42px; height: 42px; font-size: 16px; }
   .detail-close { top: calc(14px + env(safe-area-inset-top)); right: calc(14px + env(safe-area-inset-right)); width: 32px; height: 32px; font-size: 14px; }
+  .detail-info-card { padding: 14px 16px; margin-top: 20px; }
+  .detail-info-summary { font-size: 12.5px; }
 
   /* Launch splash — smaller art frame so it doesn't overwhelm small screens */
   .splash-art-frame { width: 110px; }
@@ -2644,7 +2687,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260901203920"></script>
+<script src="emulator-backbone.js?v=20260905222144"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -3444,12 +3487,13 @@ function openSettings() {
 ══════════════════════════════════════════════════════ */
 
 const DB_NAME    = 'RomPlayerDB';
-const DB_VERSION = 4;          // bumped — triggers migration
+const DB_VERSION = 5;          // bumped — new gameInfo store for IGDB metadata (release year/genre/etc)
 const META_STORE = 'library';
 const ROM_STORE  = 'roms';
 const SS_STORE   = 'saveStates';
 const ART_STORE  = 'coverArt';
 const PREFS_STORE = 'prefs';   // new — replaces localStorage for settings
+const GAMEINFO_STORE = 'gameInfo'; // IGDB metadata cache (release year, genre, developer, summary…)
 let _db = null;
 
 // ── Open / upgrade IndexedDB ─────────────────────────
@@ -3460,7 +3504,7 @@ function openDB() {
     req.onupgradeneeded = ev => {
       const db = ev.target.result;
       // Create any missing stores (safe to call on existing ones)
-      ['library','roms','saveStates','coverArt','prefs'].forEach(s => {
+      ['library','roms','saveStates','coverArt','prefs','gameInfo'].forEach(s => {
         if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath:'id' });
       });
     };
@@ -3818,6 +3862,86 @@ async function getCoverArt(name, core, debug) {
 
 // Console debug helper: debugCoverArt('Super Mario World (USA).sfc', 'snes')
 window.debugCoverArt = (name, core) => getCoverArt(name, core, true);
+
+/* ══ GAME METADATA (release year, genre, developer, etc) ═══
+   Source: same IGDB-via-worker pipeline as cover art, hitting
+   the /game-meta endpoint instead of /cover-art. Free for every
+   user — never gated behind premium, no separate quota. Cached
+   client-side exactly like cover art: found results persist
+   indefinitely, not-found results are re-tried after 7 days.
+═══════════════════════════════════════════════════ */
+const _metaMemCache = {};
+const _metaInflight = new Map();
+
+async function getGameMeta(name, core, debug) {
+  const key = core + '::' + name;
+
+  if (_metaMemCache[key] && !debug) return _metaMemCache[key];
+
+  if (!debug) {
+    try {
+      const cached = await dbGet(GAMEINFO_STORE, key);
+      if (cached) {
+        if (cached.data) { _metaMemCache[key] = cached.data; return cached.data; }
+        if (cached.notFound) {
+          if (Date.now() - (cached.ts || 0) < 7 * 24 * 60 * 60 * 1000) return null;
+        }
+      }
+    } catch(e) {}
+  } else {
+    console.log('[GameMeta] DEBUG — bypassing notFound cache, fetching live');
+  }
+
+  if (!name) return null;
+
+  if (_metaInflight.has(key)) return _metaInflight.get(key);
+
+  const promise = (async () => {
+    try {
+      const params = new URLSearchParams({ name, core });
+      const r = await fetch('/game-meta?' + params.toString(), {
+        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined,
+      });
+
+      if (debug) console.log('[GameMeta] worker status:', r.status, 'for:', name);
+
+      if (r.ok) {
+        const data = await r.json();
+        _metaMemCache[key] = data;
+        try { await dbPut(GAMEINFO_STORE, { id: key, data, ts: Date.now() }); } catch(e) {}
+        return data;
+      } else if (r.status === 404) {
+        if (debug) console.warn('[GameMeta] IGDB 404 for:', name);
+        try { await dbPut(GAMEINFO_STORE, { id: key, notFound: true, ts: Date.now() }); } catch(e) {}
+        return null;
+      } else {
+        if (debug) console.warn('[GameMeta] fetch error status:', r.status, 'for:', name);
+        return null;
+      }
+    } catch(e) {
+      if (debug) console.warn('[GameMeta] exception:', e.message);
+      return null;
+    } finally {
+      _metaInflight.delete(key);
+    }
+  })();
+
+  _metaInflight.set(key, promise);
+  return promise;
+}
+
+// Console debug helper: debugGameMeta('Need for Speed Most Wanted (USA).iso', 'ppsspp')
+window.debugGameMeta = (name, core) => getGameMeta(name, core, true);
+
+// Minimal HTML-escape for interpolating IGDB text (genre/developer/summary)
+// into innerHTML — this is third-party data, not user input, but there's
+// no reason to trust it any more than that.
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
 
 // Manually set cover art for a game — always wins, never expires, never re-fetched
 async function setManualCoverArt(name, core, url) {
@@ -4183,8 +4307,10 @@ async function openGameDetail(name, core, sysLabel) {
     <button class="detail-close" onclick="closeGameDetail()">✕</button>
     <div class="detail-content">
       <div class="detail-art-frame" id="detail-art-frame">${makePlaceholderArt(name, core)}</div>
-      <div class="detail-title">${name}</div>
-      <div class="detail-sub">${sysLabel}${pt ? ' · ⏱ ' + pt + ' played' : ''}${playCount > 1 ? ' · ' + playCount + ' sessions' : ''}</div>
+      <div class="detail-title">${escapeHtml(name)}</div>
+      <div class="detail-sub">${escapeHtml(sysLabel)}${pt ? ' · ⏱ ' + pt + ' played' : ''}${playCount > 1 ? ' · ' + playCount + ' sessions' : ''}</div>
+      <div class="detail-meta-chips" id="detail-meta-chips"></div>
+      <div class="detail-art-hint" id="detail-art-hint"></div>
       <div class="detail-actions">
         <button class="detail-play-btn" onclick='libPlayFromDB(${JSON.stringify(name)},${JSON.stringify(core)},${JSON.stringify(sysLabel)});closeGameDetail()'>▶ Play</button>
         <button class="detail-icon-btn ${isFav?'on':''}" id="detail-fav-btn" onclick='detailToggleFav()' title="Favourite">${isFav?'★':'☆'}</button>
@@ -4192,18 +4318,88 @@ async function openGameDetail(name, core, sysLabel) {
         <button class="detail-icon-btn" onclick='promptManualArt(${JSON.stringify(name)},${JSON.stringify(core)}).then(refreshDetailArt)' title="Set cover art">🖼️</button>
         <button class="detail-icon-btn danger" onclick='detailRemoveGame()' title="Remove">🗑️</button>
       </div>
+      <div class="detail-info-card" id="detail-info-card"></div>
     </div>`;
   overlay.classList.add('show');
 
-  // Load real art async
+  // Two independent lookups run in parallel: cover art (image) and game
+  // metadata (release year/genre/developer/summary — free for everyone,
+  // no premium gate). Each renders into the DOM as soon as it resolves;
+  // together they also decide whether to show the "couldn't find a match,
+  // try renaming" hint once BOTH have settled.
+  let artFound = null, metaFound = null;
+
+  const checkArtHint = () => {
+    if (artFound === null || metaFound === null) return; // still waiting on one
+    const hintEl = document.getElementById('detail-art-hint');
+    if (!hintEl) return;
+    // Only nudge the user to rename if IGDB found no match at all for this
+    // title — if metadata matched but there's simply no boxart on file,
+    // renaming the ROM won't produce one, so don't suggest it.
+    if (artFound === false && metaFound === false) {
+      hintEl.innerHTML = `🖼️ No match found for this title — <a onclick='renameGame(${JSON.stringify(name)},${JSON.stringify(core)})'>try renaming it</a> for better results, or set cover art manually.`;
+      hintEl.classList.add('show');
+    } else {
+      hintEl.classList.remove('show');
+    }
+  };
+
   getCoverArt(name, core).then(url => {
-    if (!url) return;
-    const bg = document.getElementById('detail-art-bg');
-    const frame = document.getElementById('detail-art-frame');
-    const img = `<img src="${url}" alt="${name}" onerror="this.remove()">`;
-    if (bg) bg.innerHTML = img;
-    if (frame) frame.innerHTML = img;
+    artFound = !!url;
+    if (url) {
+      const bg = document.getElementById('detail-art-bg');
+      const frame = document.getElementById('detail-art-frame');
+      const img = `<img src="${url}" alt="${escapeHtml(name)}" onerror="this.remove()">`;
+      if (bg) bg.innerHTML = img;
+      if (frame) frame.innerHTML = img;
+    }
+    checkArtHint();
   });
+
+  getGameMeta(name, core).then(meta => {
+    metaFound = !!meta;
+    renderDetailMeta(meta);
+    checkArtHint();
+  });
+}
+
+// Populate the metadata chip row + "About" card in the open detail overlay.
+// Safe to call with meta === null (e.g. no IGDB match) — clears both.
+function renderDetailMeta(meta) {
+  const chipsEl = document.getElementById('detail-meta-chips');
+  const cardEl = document.getElementById('detail-info-card');
+  if (!chipsEl || !cardEl) return;
+
+  if (!meta) { chipsEl.innerHTML = ''; cardEl.innerHTML = ''; cardEl.classList.remove('show'); return; }
+
+  const chips = [];
+  if (meta.releaseYear) chips.push(`📅 ${meta.releaseYear}`);
+  if (meta.genres && meta.genres.length) chips.push(`🎮 ${escapeHtml(meta.genres.slice(0,2).join(', '))}`);
+  if (meta.developer) chips.push(`🏢 ${escapeHtml(meta.developer)}`);
+  if (meta.rating) chips.push(`⭐ ${meta.rating}/100`);
+  chipsEl.innerHTML = chips.map(c => `<span class="detail-chip">${c}</span>`).join('');
+
+  const facts = [];
+  if (meta.developer) facts.push(['Developer', meta.developer]);
+  if (meta.publisher && meta.publisher !== meta.developer) facts.push(['Publisher', meta.publisher]);
+  if (meta.genres && meta.genres.length) facts.push(['Genre', meta.genres.join(', ')]);
+  if (meta.modes && meta.modes.length) facts.push(['Modes', meta.modes.join(', ')]);
+  if (meta.perspectives && meta.perspectives.length) facts.push(['Perspective', meta.perspectives.join(', ')]);
+
+  const factsHtml = facts.length
+    ? `<div class="detail-info-facts">${facts.map(([label,value]) =>
+        `<div class="detail-info-fact"><span class="detail-info-fact-label">${escapeHtml(label)}</span><span class="detail-info-fact-value">${escapeHtml(value)}</span></div>`
+      ).join('')}</div>`
+    : '';
+  const summaryHtml = meta.summary ? `<p class="detail-info-summary">${escapeHtml(meta.summary)}</p>` : '';
+
+  if (summaryHtml || factsHtml) {
+    cardEl.innerHTML = `<div class="detail-info-heading">About</div>${summaryHtml}${factsHtml}`;
+    cardEl.classList.add('show');
+  } else {
+    cardEl.innerHTML = '';
+    cardEl.classList.remove('show');
+  }
 }
 
 function refreshDetailArt() {
@@ -6283,7 +6479,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260901203920';
+const APP_VERSION = '20260905222144';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.

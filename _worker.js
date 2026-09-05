@@ -347,6 +347,72 @@ function cleanForSearch(raw) {
   return n;
 }
 
+// Shared IGDB search core — used by both /cover-art (needs an image) and
+// /game-meta (needs the metadata fields, cover optional). Centralising this
+// means the fuzzy-match/scoring behaviour can never drift between the two
+// endpoints — they will always agree on which IGDB row is "the" match for
+// a given ROM filename.
+//
+// requireCover=true reproduces the exact query shape /cover-art always used
+// (cover != null on every clause, including the non-platform fallback).
+// requireCover=false drops that constraint so /game-meta can still return
+// release-year/genre/etc. for games IGDB has no boxart for.
+async function igdbFindBestMatch(name, core, env, fields, requireCover) {
+  const platformId = IGDB_PLATFORM[core];
+  const token = await getIgdbToken(env);
+  const igdbHeaders = {
+    'Client-ID': env.IGDB_CLIENT_ID,
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'text/plain',
+  };
+
+  const cleanName = cleanForSearch(name);
+  if (!cleanName) return { error: 'empty' };
+
+  // Build search queries — platform-specific first, then broad fallback.
+  // Also try article-swapped version: "Legend of Zelda, The" → "The Legend of Zelda"
+  const articleSwap = cleanName.replace(/^(.+),\s*(the|a|an)$/i, '$2 $1').trim();
+  const searchTerms = [...new Set([cleanName, articleSwap])];
+
+  const queries = [];
+  for (const term of searchTerms) {
+    if (platformId) {
+      const clause = requireCover
+        ? `platforms = (${platformId}) & cover != null`
+        : `platforms = (${platformId})`;
+      queries.push(`search "${term}"; fields ${fields}; where ${clause}; limit 5;`);
+    }
+    queries.push(requireCover
+      ? `search "${term}"; fields ${fields}; where cover != null; limit 5;`
+      : `search "${term}"; fields ${fields}; limit 5;`);
+  }
+
+  let bestGame = null;
+  let bestScore = Infinity;
+
+  for (const query of queries) {
+    const r = await fetch('https://api.igdb.com/v4/games', {
+      method: 'POST', headers: igdbHeaders, body: query,
+    });
+    if (!r.ok) continue;
+    const games = await r.json();
+    if (!Array.isArray(games)) continue;
+
+    for (const game of games) {
+      if (requireCover && !game.cover?.image_id) continue;
+      const score = matchScore(cleanName, game.name || '');
+      if (score < bestScore) {
+        bestScore = score;
+        bestGame = game;
+        if (score === 0) break; // perfect match — stop immediately
+      }
+    }
+    if (bestScore < 2) break; // near-perfect match — stop trying more queries
+  }
+
+  return bestGame ? { game: bestGame, score: bestScore } : null;
+}
+
 async function handleCoverArt(request, env, CORS) {
   if (request.method === 'OPTIONS') return cors204(CORS);
   if (!env.IGDB_CLIENT_ID || !env.IGDB_CLIENT_SECRET)
@@ -357,57 +423,11 @@ async function handleCoverArt(request, env, CORS) {
   const core = url.searchParams.get('core');
   if (!name || !core) return json({ error: 'Missing name or core' }, 400, CORS);
 
-  const platformId = IGDB_PLATFORM[core];
-
   try {
-    const token = await getIgdbToken(env);
-    const igdbHeaders = {
-      'Client-ID': env.IGDB_CLIENT_ID,
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'text/plain',
-    };
+    const match = await igdbFindBestMatch(name, core, env, 'name,cover.image_id', true);
+    if (!match || match.error) return json({ error: 'Empty name after cleaning' }, match?.error ? 400 : 404, CORS);
 
-    const cleanName = cleanForSearch(name);
-    if (!cleanName) return json({ error: 'Empty name after cleaning' }, 400, CORS);
-
-    // Build search queries — platform-specific first, then broad fallback
-    // Also try article-swapped version: "Legend of Zelda, The" → "The Legend of Zelda"
-    const articleSwap = cleanName.replace(/^(.+),\s*(the|a|an)$/i, '$2 $1').trim();
-    const searchTerms = [...new Set([cleanName, articleSwap])];
-
-    const queries = [];
-    for (const term of searchTerms) {
-      if (platformId) {
-        queries.push(`search "${term}"; fields name,cover.image_id; where platforms = (${platformId}) & cover != null; limit 5;`);
-      }
-      queries.push(`search "${term}"; fields name,cover.image_id; where cover != null; limit 5;`);
-    }
-
-    let bestImageId = null;
-    let bestScore = Infinity;
-
-    for (const query of queries) {
-      const r = await fetch('https://api.igdb.com/v4/games', {
-        method: 'POST', headers: igdbHeaders, body: query,
-      });
-      if (!r.ok) continue;
-      const games = await r.json();
-      if (!Array.isArray(games)) continue;
-
-      for (const game of games) {
-        if (!game.cover?.image_id) continue;
-        const score = matchScore(cleanName, game.name || '');
-        if (score < bestScore) {
-          bestScore = score;
-          bestImageId = game.cover.image_id;
-          // Perfect match — stop immediately
-          if (score === 0) break;
-        }
-      }
-      // If we have a near-perfect match (score < 2), stop trying more queries
-      if (bestScore < 2) break;
-    }
-
+    const bestImageId = match.game.cover?.image_id;
     if (!bestImageId) return json({ error: 'Not found' }, 404, CORS);
 
     // Return the image directly — Cloudflare caches at edge for 30 days
@@ -421,12 +441,90 @@ async function handleCoverArt(request, env, CORS) {
         'Content-Type': 'image/jpeg',
         'Cache-Control': 'public, max-age=2592000',
         'Access-Control-Allow-Origin': CORS['Access-Control-Allow-Origin'],
-        'X-Cover-Score': String(bestScore),
+        'X-Cover-Score': String(match.score),
       },
     });
 
   } catch(e) {
     console.error('[cover-art]', e.message);
+    return json({ error: 'Internal error' }, 500, CORS);
+  }
+}
+
+// Collapse a long IGDB summary down to something that fits a card without
+// scrolling forever. Cuts on a word boundary rather than mid-word.
+function truncateSummary(text, max) {
+  if (!text) return null;
+  const clean = String(text).replace(/\s+/g, ' ').trim();
+  if (!clean) return null;
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max);
+  const lastSpace = cut.lastIndexOf(' ');
+  const trimmed = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut;
+  return trimmed.trim() + '…';
+}
+
+// ══════════════════════════════════════════════════════
+// IGDB Game Metadata — release year, genre, developer/
+// publisher, summary, etc. Free for every user, no premium
+// gate: this is the same public IGDB data /cover-art already
+// draws on, just with more fields requested. Deliberately a
+// separate endpoint (rather than piggybacking headers on the
+// binary /cover-art response) so it can be cached, fetched in
+// parallel, and returned even when a game has no boxart at all.
+// ══════════════════════════════════════════════════════
+const GAME_META_FIELDS = [
+  'name', 'first_release_date', 'genres.name', 'summary', 'rating',
+  'game_modes.name', 'player_perspectives.name',
+  'involved_companies.company.name', 'involved_companies.developer', 'involved_companies.publisher',
+].join(',');
+
+async function handleGameMeta(request, env, CORS) {
+  if (request.method === 'OPTIONS') return cors204(CORS);
+  if (!env.IGDB_CLIENT_ID || !env.IGDB_CLIENT_SECRET)
+    return json({ error: 'IGDB not configured' }, 500, CORS);
+
+  const url = new URL(request.url);
+  const name = url.searchParams.get('name');
+  const core = url.searchParams.get('core');
+  if (!name || !core) return json({ error: 'Missing name or core' }, 400, CORS);
+
+  try {
+    const match = await igdbFindBestMatch(name, core, env, GAME_META_FIELDS, false);
+    if (!match || match.error) return json({ error: 'Not found' }, match?.error ? 400 : 404, CORS);
+
+    const g = match.game;
+    const genres = (g.genres || []).map(x => x.name).filter(Boolean);
+    const modes = (g.game_modes || []).map(x => x.name).filter(Boolean);
+    const perspectives = (g.player_perspectives || []).map(x => x.name).filter(Boolean);
+
+    let developer = null, publisher = null;
+    for (const ic of (g.involved_companies || [])) {
+      const companyName = ic.company?.name;
+      if (!companyName) continue;
+      if (ic.developer && !developer) developer = companyName;
+      if (ic.publisher && !publisher) publisher = companyName;
+    }
+
+    const payload = {
+      matchedTitle: g.name || null,
+      releaseYear: g.first_release_date ? new Date(g.first_release_date * 1000).getUTCFullYear() : null,
+      genres: genres.slice(0, 3),
+      developer,
+      publisher,
+      rating: g.rating != null ? Math.round(g.rating) : null,
+      modes: modes.slice(0, 2),
+      perspectives: perspectives.slice(0, 2),
+      summary: truncateSummary(g.summary, 240),
+      matchScore: match.score,
+    };
+
+    // No box art required here, so this can hit even for obscure/no-cover
+    // entries — cached at the edge for 30 days same as /cover-art.
+    return json(payload, 200, { ...CORS, 'Cache-Control': 'public, max-age=2592000' });
+
+  } catch(e) {
+    console.error('[game-meta]', e.message);
     return json({ error: 'Internal error' }, 500, CORS);
   }
 }
@@ -456,6 +554,9 @@ export default {
 
     if (pathname === '/cover-art')
       return handleCoverArt(request, env, CORS);
+
+    if (pathname === '/game-meta')
+      return handleGameMeta(request, env, CORS);
 
     return env.ASSETS.fetch(request);
   }
