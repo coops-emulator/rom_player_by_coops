@@ -2691,7 +2691,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260906072102"></script>
+<script src="emulator-backbone.js?v=20260906220830"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6483,7 +6483,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260906072102';
+const APP_VERSION = '20260906220830';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -7445,7 +7445,7 @@ function switchAuthMode(mode) {
     if (sub)   sub.textContent   = 'Welcome back to ROM Player';
     if (btn)   btn.textContent   = 'Sign in';
     if (sw)    sw.innerHTML      = "Don't have an account? <a onclick=\"switchAuthMode('signup')\">Sign up</a>";
-    if (forgot) forgot.style.display = '';
+    if (forgot) forgot.style.display = 'block';
   } else if (mode === 'signup') {
     if (title) title.textContent = 'Create account';
     if (sub)   sub.textContent   = 'Sign up for ROM Player by Coops';
