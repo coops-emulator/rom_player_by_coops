@@ -1517,6 +1517,9 @@ footer {
 }
 .auth-switch { font-size: 12px; color: var(--muted); text-align: center; margin-top: 6px; }
 .auth-switch a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.auth-forgot { font-size: 12px; text-align: right; margin: -8px 0 14px; display: none; }
+.auth-forgot a { color: var(--muted); cursor: pointer; text-decoration: none; }
+.auth-forgot a:hover { color: var(--accent2); text-decoration: underline; }
 .auth-error { font-size: 12px; color: #f87171; margin-bottom: 10px; display:none; }
 
 /* Premium section in settings */
@@ -2591,6 +2594,7 @@ body.game-active .wrap {
       <div class="auth-error" id="auth-error"></div>
       <input class="auth-input" id="auth-email" type="email" placeholder="Email address" autocomplete="email">
       <input class="auth-input" id="auth-password" type="password" placeholder="Password (8+ characters)" autocomplete="current-password">
+      <div class="auth-forgot" id="auth-forgot"><a onclick="switchAuthMode('reset')">Forgot password?</a></div>
       <button class="auth-btn" id="auth-submit-btn" onclick="authSubmit()">Create account</button>
       <button class="auth-btn secondary" onclick="closeAuthModal()">Cancel</button>
       <div class="auth-switch" id="auth-switch">
@@ -2687,7 +2691,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260905223059"></script>
+<script src="emulator-backbone.js?v=20260906072102"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6479,7 +6483,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260905223059';
+const APP_VERSION = '20260906072102';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -6793,6 +6797,14 @@ function initSupabase() {
       _accessToken = session?.access_token || null;
       await _refreshPremiumState();
       _updatePremiumUI();
+      // Fires once when the person lands back on the app via the emailed
+      // reset link — Supabase has already turned that link into a live
+      // (temporary) session by this point, so just prompt for a new
+      // password rather than dropping them straight into the app on a
+      // recovery-only session.
+      if (event === 'PASSWORD_RECOVERY') {
+        openAuthModal('recovery');
+      }
     });
     // getSession fires before the session cookie is fully restored on PWA cold start.
     // Small delay ensures the auth token is attached before we query profiles.
@@ -7391,7 +7403,7 @@ function openAuthModal(mode) {
   if (bg) bg.classList.add('open');
   switchAuthMode(_authMode);
   setTimeout(() => {
-    const inp = document.getElementById('auth-email');
+    const inp = document.getElementById(_authMode === 'recovery' ? 'auth-password' : 'auth-email');
     if (inp) inp.focus();
   }, 100);
 }
@@ -7401,30 +7413,66 @@ function closeAuthModal(e) {
   const bg = document.getElementById('auth-modal-bg');
   if (bg) bg.classList.remove('open');
   _clearAuthError();
+  // Bailing out of a password-recovery flow without actually setting a new
+  // password shouldn't leave a signed-in session hanging around from the
+  // recovery link alone — that'd be a session the person never meant to
+  // start using as their normal login.
+  if (_authMode === 'recovery' && _supabase) {
+    _supabase.auth.signOut().catch(() => {});
+  }
 }
 
 function switchAuthMode(mode) {
   _authMode = mode;
-  const title  = document.getElementById('auth-modal-title');
-  const sub    = document.getElementById('auth-modal-sub');
-  const btn    = document.getElementById('auth-submit-btn');
-  const sw     = document.getElementById('auth-switch');
+  const title    = document.getElementById('auth-modal-title');
+  const sub      = document.getElementById('auth-modal-sub');
+  const btn      = document.getElementById('auth-submit-btn');
+  const sw       = document.getElementById('auth-switch');
+  const emailInp = document.getElementById('auth-email');
+  const pwInp    = document.getElementById('auth-password');
+  const forgot   = document.getElementById('auth-forgot');
   _clearAuthError();
+
+  // Every mode below only needs to override what's different for it —
+  // reset the shared bits to their default/visible state first.
+  if (emailInp) { emailInp.style.display = ''; }
+  if (pwInp)    { pwInp.style.display = ''; pwInp.placeholder = 'Password (8+ characters)'; pwInp.value = ''; }
+  if (forgot)   forgot.style.display = 'none';
+  if (sw)       sw.style.display = '';
+
   if (mode === 'login') {
     if (title) title.textContent = 'Sign in';
     if (sub)   sub.textContent   = 'Welcome back to ROM Player';
     if (btn)   btn.textContent   = 'Sign in';
     if (sw)    sw.innerHTML      = "Don't have an account? <a onclick=\"switchAuthMode('signup')\">Sign up</a>";
-  } else {
+    if (forgot) forgot.style.display = '';
+  } else if (mode === 'signup') {
     if (title) title.textContent = 'Create account';
     if (sub)   sub.textContent   = 'Sign up for ROM Player by Coops';
     if (btn)   btn.textContent   = 'Create account';
     if (sw)    sw.innerHTML      = "Already have an account? <a onclick=\"switchAuthMode('login')\">Sign in</a>";
+  } else if (mode === 'reset') {
+    if (title) title.textContent = 'Reset password';
+    if (sub)   sub.textContent   = "Enter your email and we'll send you a reset link";
+    if (btn)   btn.textContent   = 'Send reset link';
+    if (pwInp) pwInp.style.display = 'none';
+    if (sw)    sw.innerHTML      = "Remembered it? <a onclick=\"switchAuthMode('login')\">Sign in</a>";
+  } else if (mode === 'recovery') {
+    if (title) title.textContent = 'Set a new password';
+    if (sub)   sub.textContent   = 'Choose a new password for your account';
+    if (btn)   btn.textContent   = 'Update password';
+    if (emailInp) emailInp.style.display = 'none';
+    if (pwInp)    pwInp.placeholder = 'New password (8+ characters)';
+    if (sw)       sw.style.display = 'none';
   }
 }
 
 async function authSubmit() {
   if (!_supabase) return showToast('Connection error — try again');
+
+  if (_authMode === 'reset')    return _submitPasswordResetRequest();
+  if (_authMode === 'recovery') return _submitNewPassword();
+
   const email    = (document.getElementById('auth-email')?.value || '').trim();
   const password = (document.getElementById('auth-password')?.value || '').trim();
   if (!email || !password) return _showAuthError('Please enter your email and password');
@@ -7448,6 +7496,48 @@ async function authSubmit() {
     _showAuthError(e.message || 'Something went wrong — try again');
   }
   if (btn) { btn.textContent = _authMode === 'login' ? 'Sign in' : 'Create account'; btn.disabled = false; }
+}
+
+// "Send me a reset link" step — just needs the email, no session yet.
+async function _submitPasswordResetRequest() {
+  const email = (document.getElementById('auth-email')?.value || '').trim();
+  if (!email) return _showAuthError('Please enter your email');
+
+  const btn = document.getElementById('auth-submit-btn');
+  if (btn) { btn.textContent = 'Sending…'; btn.disabled = true; }
+  try {
+    const { error } = await _supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin + window.location.pathname,
+    });
+    if (error) throw error;
+    showToast('📧 Check your email for a reset link');
+    switchAuthMode('login');
+  } catch(e) {
+    _showAuthError(e.message || 'Could not send reset email — try again');
+  }
+  if (btn) { btn.textContent = 'Send reset link'; btn.disabled = false; }
+}
+
+// Landed back here from the emailed link — Supabase already turned that
+// link into a live (temporary) session via detectSessionInUrl, so this
+// step only needs the new password, no email/current-password required.
+async function _submitNewPassword() {
+  const password = (document.getElementById('auth-password')?.value || '').trim();
+  if (!password)           return _showAuthError('Please enter a new password');
+  if (password.length < 8) return _showAuthError('Password must be at least 8 characters');
+
+  const btn = document.getElementById('auth-submit-btn');
+  if (btn) { btn.textContent = 'Updating…'; btn.disabled = true; }
+  try {
+    const { error } = await _supabase.auth.updateUser({ password });
+    if (error) throw error;
+    const bg = document.getElementById('auth-modal-bg');
+    if (bg) bg.classList.remove('open');
+    showToast("✅ Password updated — you're signed in");
+  } catch(e) {
+    _showAuthError(e.message || 'Could not update password — try again');
+  }
+  if (btn) { btn.textContent = 'Update password'; btn.disabled = false; }
 }
 
 function _showAuthError(msg) {
