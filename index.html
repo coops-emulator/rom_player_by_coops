@@ -65,6 +65,165 @@
 ═══════════════════════════════════════════════════ */
 :root { --ease-rp: cubic-bezier(.22,1,.36,1); }
 
+/* ═══════════════════════════════════════════════════
+   CRT SCREEN TEXTURE — scanlines + vignette + phosphor
+   fringe, applied entirely as BACKGROUND LAYERS (never
+   a DOM overlay), so it can never sit on top of text,
+   never blocks a click, and never needs a z-index.
+
+   Every value below reads var(--glow)/var(--bg), which
+   are already redefined per [data-theme=…] block, so
+   the exact same declarations look correct on all 15
+   themes with zero per-theme duplication — same trick
+   already used by .text-glow / .animate-pulse-glow above.
+
+   v2 — rebuilt after the first pass looked cheap/aliased
+   and the top-glow read as a flat coloured smear rather
+   than a bloom. Two root causes, both fixed below:
+
+   1) SCANLINES were built with repeating-linear-gradient's
+      own internal analytic repeat, with a repeat length of
+      only 3px. Browsers repeat that shape by re-evaluating
+      the gradient function per pixel rather than tiling a
+      cached raster, and at a 3px period that math rounds
+      inconsistently across engines/zoom levels — reads as
+      soft-focus mush up close, and as visible banding at
+      certain zoom/DPI combinations. Fixed by switching to a
+      background-size TILE: one small linear-gradient image,
+      sized explicitly via background-size, repeated via
+      background-repeat. Same visual shape, but the browser
+      rasterises ONE tile and stamps it, which is both
+      crisper and cheaper to paint.
+
+   2) The PHOSPHOR GLOW used every theme's --glow at full
+      strength (some themes carry that variable at up to .30
+      alpha in a fully saturated hue — pure red, magenta —
+      which is fine for a small button glow but reads as a
+      flat, oversaturated blob when stretched across the top
+      half of the whole viewport). Fixed by (a) shrinking the
+      footprint drastically so it only ever touches a thin
+      band near the very top, not half the screen, and (b)
+      dimming the colour itself with color-mix() so the
+      effect's intensity is no longer hostage to whatever
+      alpha a given theme's --glow happens to carry. Guarded
+      with @supports so browsers without color-mix() fall
+      back to a neutral, always-safe tint instead of losing
+      the whole background-image list (an unsupported value
+      anywhere in that comma list invalidates ALL of it).
+
+   Tunables (safe to override per element, e.g. inline
+   style="--crt-line-alpha:.04" or scoped to one theme:
+   [data-theme="doom"] .crt-bg { --crt-vignette-max: .45 }):
+═══════════════════════════════════════════════════ */
+:root {
+  --crt-line-pitch:     5px;   /* px between each scanline dip's centre. 4px = tighter/
+                                   finer CRT-ish, 6px = gentler, kinder to low-res panels */
+  --crt-line-alpha:     .065;  /* darkness at the centre of each dip — top of the .03–.07
+                                   legibility range; safe now the pitch renders cleanly */
+  --crt-fringe-alpha:   .028;  /* strength of the red/cyan phosphor-mask fringe hint */
+  --crt-fringe-offset:  1px;   /* how far the fringe colour sits from the scanline edge */
+  --crt-vignette-inner: 58%;   /* radius that stays 100% transparent — the "safe zone" that
+                                   always contains your text-bearing content */
+  --crt-vignette-mid:   82%;   /* a middle stop so the corners fade in gradually instead of
+                                   jumping straight from transparent to dark (avoids a visible
+                                   "ring") */
+  --crt-vignette-mid-alpha: .10;
+  --crt-vignette-max:   .30;   /* corner darkness at the very edge. Deliberately higher than
+                                   the .03–.07 ceiling above: it's zero across the readable
+                                   centre and only ramps up in the outer corners/margins, so
+                                   it never touches legibility. */
+  --crt-phosphor-w:     85%;   /* footprint of the top-edge glow — kept small on purpose */
+  --crt-phosphor-h:     38%;
+  --crt-phosphor-y:     -16%;  /* centred mostly ABOVE the viewport, so only its lower fringe
+                                   is ever visible — a hint of light spilling from the top
+                                   bezel, not a wash across the screen */
+  --crt-phosphor-strength: 38%; /* how much of --glow survives into the ambient tint —
+                                    see the color-mix() block below */
+  --crt-phosphor-color: rgba(255,255,255,.035); /* safe default; overridden by whichever
+                                                    @supports block below actually applies */
+}
+
+/* Derives a dimmed, theme-aware glow colour for the phosphor layer without
+   ever risking the rest of the background-image list. If color-mix() isn't
+   understood, only THIS custom property fails quietly — the gradients that
+   reference it keep using the safe rgba() default above instead of the
+   whole `background-image` shorthand going invalid. */
+@supports (background: color-mix(in srgb, red, blue)) {
+  .crt-bg, body {
+    --crt-phosphor-color: color-mix(in srgb, var(--glow) var(--crt-phosphor-strength), transparent);
+  }
+}
+
+/* Reusable utility — apply to <body> (already wired in below) or to any
+   other element (a modal, a card, a settings panel) to give it the same
+   glass-screen treatment. Grouped onto `body` directly here so the whole
+   app gets it for free with a single declaration, no extra DOM node. */
+.crt-bg, body {
+  background-color: var(--bg);
+  background-image:
+    /* 1. Scanlines — a single soft triangular dip (0 → alpha → 0), tiled via
+          background-size rather than repeating-linear-gradient's own
+          analytic repeat, so it rasterises crisply instead of aliasing. */
+    linear-gradient(
+      to bottom,
+      transparent 0%,
+      rgba(0,0,0,var(--crt-line-alpha)) 50%,
+      transparent 100%
+    ),
+    /* 2. Phosphor-mask fringe — a whisper of red/cyan misconvergence tiled
+          at the SAME pitch as the scanlines, screen-blended so it can only
+          ever add a faint colour glint, never darken or muddy anything. */
+    linear-gradient(
+      to bottom,
+      rgba(255,32,96,var(--crt-fringe-alpha)) 0,
+      transparent var(--crt-fringe-offset),
+      transparent calc(100% - var(--crt-fringe-offset)),
+      rgba(32,200,255,var(--crt-fringe-alpha)) 100%
+    ),
+    /* 3. Vignette — curved, darkened tube edges with a three-stop falloff
+          so the corners fade in gradually rather than showing a hard ring.
+          Fully transparent through the whole readable centre. */
+    radial-gradient(
+      ellipse 135% 135% at 50% 50%,
+      transparent var(--crt-vignette-inner),
+      rgba(0,0,0,var(--crt-vignette-mid-alpha)) var(--crt-vignette-mid),
+      rgba(0,0,0,var(--crt-vignette-max)) 100%
+    ),
+    /* 4. Phosphor glow — a small, dimmed, theme-tinted bloom hugging the
+          top edge only (see --crt-phosphor-color above for why it's no
+          longer just var(--glow) at full strength). */
+    radial-gradient(
+      ellipse var(--crt-phosphor-w) var(--crt-phosphor-h) at 50% var(--crt-phosphor-y),
+      var(--crt-phosphor-color) 0%,
+      transparent 75%
+    );
+  background-size:
+    100% var(--crt-line-pitch),
+    100% var(--crt-line-pitch),
+    100% 100%,
+    100% 100%;
+  /* multiply = can only darken (scanlines, vignette); screen = can only
+     lighten/tint (fringe, phosphor glow) — so no layer can ever wash out
+     or muddy the theme's base colour, only add texture on top of it. */
+  background-blend-mode: multiply, screen, multiply, screen;
+  background-repeat: repeat, repeat, no-repeat, no-repeat;
+  /* Only the viewport-scale layers (vignette/glow) stay pinned while
+     scrolling — the tiled scanline/fringe layers look identical either
+     way, and leaving them un-fixed is cheaper to repaint on scroll. */
+  background-attachment: scroll, scroll, fixed, fixed;
+}
+
+/* Escape hatches for people who can't/shouldn't see the effect:
+   - forced-colors (Windows High Contrast) would otherwise fight the OS theme
+   - a manual opt-out class, e.g. toggled from Settings via toggleCrtEffect() */
+@media (forced-colors: active) {
+  .crt-bg, body { background-image: none; }
+}
+html.crt-off .crt-bg,
+html.crt-off body {
+  background-image: none;
+}
+
 @keyframes rp-float-y   { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
 @keyframes rp-pulse-glow{ 0%,100% { opacity: .55; } 50% { opacity: 1; } }
 @keyframes rp-flicker   { 0%,100% { opacity: 1; } 92% { opacity: 1; } 93% { opacity: .72; } 94% { opacity: 1; } 97% { opacity: .86; } 98% { opacity: 1; } }
@@ -334,11 +493,22 @@
 
 html, body {
   height: 100%;
-  background: var(--bg);
+  background-color: var(--bg); /* longhand only — keeps iOS Safari's elastic
+     overscroll band themed correctly without touching body's background-image
+     layers below */
   color: var(--text);
   font-family: var(--font);
   overflow-x: hidden;
 }
+
+/* NOTE: body's background-image/-blend-mode (scanlines, vignette, phosphor
+   glow) are set by the `.crt-bg, body { … }` rule near the top of this
+   stylesheet (CRT SCREEN TEXTURE block), further up the cascade so it
+   never fights this rule. Deliberately longhand throughout — the
+   `background:` SHORTHAND resets background-image/-blend-mode to initial,
+   which would silently erase those layers on every theme switch. If you
+   ever need to change body's flat colour outside a theme, edit --bg for
+   that theme, not this rule. */
 
 body {
   display: flex; flex-direction: column; align-items: center;
@@ -878,6 +1048,29 @@ input, textarea, select { font-size: 16px !important; }
 }
 .modal-actions { display: flex; gap: 8px; }
 .modal-actions .lib-btn { padding: 9px 0; font-size: 13px; }
+
+/* Save-state picker (Linkup Room → Share a Save State) */
+.state-pick-list {
+  max-height: 320px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; gap: 8px; text-align: left;
+  margin-top: 4px;
+}
+.state-pick-item {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surf2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 10px; cursor: pointer; transition: border-color .15s;
+}
+.state-pick-item:hover { border-color: var(--accent); }
+.state-pick-thumb {
+  width: 44px; height: 44px; border-radius: 6px; overflow: hidden; flex-shrink: 0;
+  background: var(--surf); display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+}
+.state-pick-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.state-pick-info { flex: 1; min-width: 0; }
+.state-pick-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.state-pick-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.state-pick-empty { text-align: center; padding: 24px 0; color: var(--muted); font-size: 13px; }
 
 footer {
   margin-top: 36px; font-size: 11px; color: var(--dim); text-align: center; line-height: 1.8;
@@ -2201,12 +2394,18 @@ body.game-active .wrap {
           </div>
           <div class="rx-members" id="rx-members"></div>
           <div class="rx-upload-bar">
-            <button class="rx-btn accent" style="flex:1" onclick="document.getElementById('rx-file-inp').click()">
-              + Share a file from your device
+            <button class="rx-btn accent" style="flex:1 1 auto" onclick="document.getElementById('rx-file-inp').click()" title="Share a ROM file">
+              📂 Share a ROM
             </button>
-            <button class="rx-btn" onclick="rxShareFromLibrary()">Share from Library</button>
+            <button class="rx-btn" onclick="rxShareFromLibrary()" title="Share your most recently played ROM straight from your Library">Share from Library</button>
+            <button class="rx-btn" onclick="rxOpenStatePicker()" title="Share a save state so a friend can continue right where you left off">💾 Share a Save State</button>
+            <button class="rx-btn" onclick="document.getElementById('rx-anyfile-inp').click()" title="Share any other file — screenshots, cheat files, BIOS files, archives, anything">📎 Share a File</button>
             <input type="file" id="rx-file-inp" style="display:none"
               accept=".nes,.smc,.sfc,.gba,.gb,.gbc,.z64,.n64,.v64,.md,.gen,.bin,.cue,.iso,.cso,.pce,.ws,.wsc,.vb,.nds,.32x,.gg,.sms,.ngp,.ngc,.a26,.col,.int,.vec,.elf,.pbp,.sat,.chd,.s32,.scd,.neo,.ngeo,.lynx,.atl,.msx">
+            <!-- Deliberately no `accept` filter — this lane is the generic
+                 catch-all for anything that ISN'T a ROM or a save state
+                 (screenshots, cheat files, BIOS dumps, zipped configs…). -->
+            <input type="file" id="rx-anyfile-inp" style="display:none">
           </div>
           <div id="rx-grid-wrap">
             <div class="rx-empty" id="rx-empty">No files shared yet — be the first to share one!</div>
@@ -2581,6 +2780,15 @@ body.game-active .wrap {
           </div>
         </div>
 
+        <!-- CRT screen texture -->
+        <div class="settings-app-row" style="margin-top:12px">
+          <div class="settings-app-info">
+            <div class="settings-app-label">CRT Screen Texture</div>
+            <div class="settings-app-sub">Subtle scanlines, vignette &amp; phosphor glow behind the UI</div>
+          </div>
+          <button class="rx-btn" id="crt-toggle-btn" onclick="toggleCrtEffect()" style="flex-shrink:0">On</button>
+        </div>
+
       </div>
 
     </div>
@@ -2620,6 +2828,19 @@ body.game-active .wrap {
       <h3>💿 Which console is this?</h3>
       <p><span id="sys-choice-ext">This extension</span> is used by more than one system here — pick the right one so the correct core loads.</p>
       <div class="modal-actions" id="sys-choice-buttons"></div>
+    </div>
+  </div>
+
+  <!-- Save-state picker — feeds "💾 Share a Save State" in the Linkup Room -->
+  <div class="modal-bg" id="state-picker-modal">
+    <div class="modal" style="max-width:420px">
+      <h3>💾 Share a Save State</h3>
+      <p>Pick a save to send. Whoever receives it needs the matching game already
+         in their own Library for it to apply automatically.</p>
+      <div class="state-pick-list" id="state-pick-list"></div>
+      <div class="modal-actions" style="margin-top:14px">
+        <button class="lib-btn" onclick="closeStatePicker()">Cancel</button>
+      </div>
     </div>
   </div>
 
@@ -2691,7 +2912,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260906220830"></script>
+<script src="emulator-backbone.js?v=20260908150000"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -3415,7 +3636,27 @@ document.addEventListener('DOMContentLoaded', async () => {
   applyTheme(savedTheme || _currentTheme, true);
   applyGameHolderHeight();
   renderRecentlyPlayed();
+
+  // CRT screen texture — persisted the same way as theme, defaults to on
+  const crtOff = await prefGet('rp-crt-off', false);
+  document.documentElement.classList.toggle('crt-off', !!crtOff);
+  const crtBtn = document.getElementById('crt-toggle-btn');
+  if (crtBtn) crtBtn.textContent = crtOff ? 'Off' : 'On';
 });
+
+/* ══ CRT SCREEN TEXTURE TOGGLE ═══════════════════════
+   Some people are sensitive to fine repeating patterns even at very low
+   opacity — this lets them turn the whole scanline/vignette/phosphor
+   effect off from Settings without touching a stylesheet. Persisted via
+   the same prefGet/prefSet IDB helpers as every other setting in this
+   app (never raw localStorage — see the v4→v5 migration notes). */
+async function toggleCrtEffect() {
+  const isOff = document.documentElement.classList.toggle('crt-off');
+  await prefSet('rp-crt-off', isOff);
+  const btn = document.getElementById('crt-toggle-btn');
+  if (btn) btn.textContent = isOff ? 'Off' : 'On';
+  showToast(isOff ? '🖥️ CRT texture off' : '🖥️ CRT texture on');
+}
 
 /* ══ HEADER CLOCK ════════════════════════════════════ */
 let _clockPrev = '';
@@ -4668,11 +4909,36 @@ document.getElementById('relaunch-modal').addEventListener('click', function(e) 
   if (e.target === this) closeRelaunchModal();
 });
 
-/* ══ ROM EXCHANGE ════════════════════════════════════
+/* ══ ROM EXCHANGE (Linkup Room) ═══════════════════════
    P2P room: host creates code, up to 4 peers join.
-   Anyone can share files from device or library.
-   Files transfer directly peer-to-peer in chunks.
-   Recipients can download to their local library.
+   Anyone can share ROMs, save states, or arbitrary files.
+   Everything transfers directly peer-to-peer in chunks —
+   nothing ever touches a server.
+
+   Every shared thing is an "item" with a `kind`:
+     'rom'   — a game file. Unchanged behaviour: on receipt
+               it's imported straight into the recipient's
+               Library.
+     'state' — an EmulatorJS save-state blob (see SAVE STATES
+               section below). On receipt we try to match it
+               to a game the recipient ALREADY owns (same
+               core + same name) and, only with the user's
+               explicit confirmation, write it into that
+               game's Quick Save slot. If there's no
+               unambiguous match, or the user declines, it's
+               offered as a plain .state file download instead
+               — never silently dropped, never silently
+               guessed onto the wrong game.
+     'file'  — anything else (screenshots, cheat files, BIOS
+               dumps, zipped configs…). No validation at all;
+               just a peer-to-peer blob the recipient can save
+               straight to their device. Never touches the ROM
+               library or IndexedDB.
+
+   The wire protocol (item-announce/item-req/item-chunk/…) is
+   identical for all three kinds — only the metadata riding
+   alongside the bytes, and what happens once the bytes finish
+   reassembling on the other end, differs by kind.
 ═══════════════════════════════════════════════════ */
 const RX_MAX = 4;
 const RX_CHUNK = 65536;
@@ -4684,7 +4950,11 @@ let _rx = {
   conns:   [],       // DataConnection[]
   myName:  null,     // your display name (from getUsername())
   memberNames: {},   // idx -> their chosen display name (host-tracked)
-  roms:    {},       // id → { id, name, sysLabel, core, size, sharerName, chunks?, total?, buf? }
+  items:   {},       // id → { id, kind:'rom'|'state'|'file', name, size, sharerName,
+                      //        sysLabel?, core?,           -- kind:'rom'
+                      //        game?, slot?, thumb?,        -- kind:'state'
+                      //        mime?,                       -- kind:'file'
+                      //        chunks?, rcvd?, total?, _buf? }
 };
 
 /* ══ USERNAME (ROM Exchange identity) ═══════════════ */
@@ -4914,7 +5184,7 @@ let _rxJoinPassword = '';
 async function rxHost() {
   if (_rx.peer) rxLeave();
   const code = rxGenCode();
-  _rx.isHost = true; _rx.code = code; _rx.conns = []; _rx.roms = {};
+  _rx.isHost = true; _rx.code = code; _rx.conns = []; _rx.items = {};
   _rx.memberNames = {}; _rx.myName = getUsername();
 
   // Premium: ask for optional room password
@@ -4951,7 +5221,7 @@ async function rxHost() {
         _rx.memberNames[idx] = theirName;
         const members = rxGetMembers();
         conn.send({ type:'welcome', name: theirName, members,
-          roms: Object.values(_rx.roms).map(r => rxRomMeta(r)) });
+          items: Object.values(_rx.items).map(r => rxItemMeta(r)) });
         rxBroadcast({ type:'member-join', name: theirName }, conn);
         rxRenderMembers();
         return;
@@ -4973,7 +5243,7 @@ async function rxJoin() {
   const raw = document.getElementById('rx-code-input').value.trim().toUpperCase();
   if (raw.length !== 6) { showToast('⚠️ Enter the full 6-character room code'); return; }
   if (_rx.peer) rxLeave();
-  _rx.isHost = false; _rx.code = raw; _rx.conns = []; _rx.roms = {};
+  _rx.isHost = false; _rx.code = raw; _rx.conns = []; _rx.items = {};
   // Ask for password (will be sent in hello — host ignores it if room is open)
   const pw = window.prompt('Enter room password (leave blank if no password):') || '';
   _rxJoinPassword = pw.trim();
@@ -4996,8 +5266,16 @@ async function rxJoin() {
   });
 }
 
-function rxRomMeta(r) {
-  return { id:r.id, name:r.name, sysLabel:r.sysLabel, core:r.core, size:r.size, sharerName:r.sharerName };
+// The metadata riding in item-announce/welcome — deliberately excludes
+// `_buf` (could be tens of MB; only ever sent over the wire in chunks,
+// on request) but DOES include `thumb` for save states, since a save's
+// screenshot is only a few KB and letting people preview it before
+// deciding to download the full state is worth the extra bytes.
+function rxItemMeta(r) {
+  const base = { id:r.id, kind:r.kind || 'rom', name:r.name, size:r.size, sharerName:r.sharerName };
+  if (r.kind === 'state') return { ...base, game:r.game, slot:r.slot, thumb:r.thumb || null };
+  if (r.kind === 'file')  return { ...base, mime:r.mime || '' };
+  return { ...base, sysLabel:r.sysLabel, core:r.core }; // 'rom' (default, incl. legacy peers)
 }
 
 function rxGetMembers() {
@@ -5009,7 +5287,7 @@ function rxGetMembers() {
 async function rxOnData(d, fromConn, fromName) {
   if (d.type === 'welcome') {
     _rx.myName = d.name;
-    d.roms.forEach(r => { _rx.roms[r.id] = { ...r, chunks: new Array(Math.ceil(r.size/RX_CHUNK)), rcvd:0, total:Math.ceil(r.size/RX_CHUNK) }; });
+    d.items.forEach(r => { _rx.items[r.id] = { ...r, chunks: new Array(Math.ceil(r.size/RX_CHUNK)), rcvd:0, total:Math.ceil(r.size/RX_CHUNK) }; });
     rxShowRoom(_rx.code);
     rxRenderMembers(d.members);
     rxRenderGrid();
@@ -5022,49 +5300,50 @@ async function rxOnData(d, fromConn, fromName) {
   }
   if (d.type === 'member-leave') { rxRenderMembers(); }
 
-  if (d.type === 'rom-announce') {
-    // A new ROM was shared — add to our list
-    if (!_rx.roms[d.rom.id]) {
-      _rx.roms[d.rom.id] = { ...d.rom, chunks: new Array(Math.ceil(d.rom.size/RX_CHUNK)), rcvd:0, total:Math.ceil(d.rom.size/RX_CHUNK) };
+  if (d.type === 'item-announce') {
+    // A new item was shared — add to our list
+    if (!_rx.items[d.item.id]) {
+      _rx.items[d.item.id] = { ...d.item, chunks: new Array(Math.ceil(d.item.size/RX_CHUNK)), rcvd:0, total:Math.ceil(d.item.size/RX_CHUNK) };
     }
     if (_rx.isHost) rxBroadcast(d, fromConn); // relay to others
     rxRenderGrid();
-    showToast('📦 ' + d.rom.sharerName + ' shared ' + d.rom.name);
+    const kindLabel = d.item.kind === 'state' ? 'a save state for' : d.item.kind === 'file' ? 'a file:' : '';
+    showToast('📦 ' + d.item.sharerName + ' shared ' + kindLabel + ' ' + d.item.name);
   }
 
-  if (d.type === 'rom-req') {
-    // Someone wants to download a ROM we shared — send it
-    const r = _rx.roms[d.id];
+  if (d.type === 'item-req') {
+    // Someone wants to download an item we shared — send it
+    const r = _rx.items[d.id];
     if (!r || !r._buf) return;
     const arr = new Uint8Array(r._buf);
     const total = Math.ceil(arr.length / RX_CHUNK);
-    fromConn.send({ type:'rom-start', id:d.id, size:arr.length, total });
+    fromConn.send({ type:'item-start', id:d.id, size:arr.length, total });
     for (let i = 0; i < total; i++) {
-      fromConn.send({ type:'rom-chunk', id:d.id, idx:i, data: arr.slice(i*RX_CHUNK,(i+1)*RX_CHUNK) });
+      fromConn.send({ type:'item-chunk', id:d.id, idx:i, data: arr.slice(i*RX_CHUNK,(i+1)*RX_CHUNK) });
       if (i % 4 === 0) await new Promise(r => setTimeout(r, 0));
       // Update progress on sender side too
       rxUpdateCard(d.id, Math.round((i+1)/total*100));
     }
-    fromConn.send({ type:'rom-end', id:d.id });
+    fromConn.send({ type:'item-end', id:d.id });
   }
 
-  // Host relays rom-req to the right sharer
-  if (d.type === 'rom-req-relay') {
+  // Host relays item-req to the right sharer
+  if (d.type === 'item-req-relay') {
     const sharer = _rx.conns.find(c => c && c.open && c.peer === d.sharerPeer);
-    if (sharer) sharer.send({ type:'rom-req', id:d.id, requesterPeer: fromConn.peer });
+    if (sharer) sharer.send({ type:'item-req', id:d.id, requesterPeer: fromConn.peer });
     // Also hook up a relay path for the chunks
     _rx._relayTarget = _rx._relayTarget || {};
     _rx._relayTarget[d.id] = fromConn;
   }
 
-  if (d.type === 'rom-start') {
-    const r = _rx.roms[d.id];
+  if (d.type === 'item-start') {
+    const r = _rx.items[d.id];
     if (r) { r.chunks = new Array(d.total); r.rcvd = 0; r.total = d.total; r.size = d.size; }
     rxUpdateCard(d.id, 0, 'Downloading…');
   }
 
-  if (d.type === 'rom-chunk') {
-    const r = _rx.roms[d.id];
+  if (d.type === 'item-chunk') {
+    const r = _rx.items[d.id];
     if (!r) return;
     r.chunks[d.idx] = d.data; r.rcvd++;
     const pct = Math.round(r.rcvd / r.total * 100);
@@ -5074,8 +5353,8 @@ async function rxOnData(d, fromConn, fromName) {
     }
   }
 
-  if (d.type === 'rom-end') {
-    const r = _rx.roms[d.id];
+  if (d.type === 'item-end') {
+    const r = _rx.items[d.id];
     if (!r) return;
     // Reassemble
     const out = new Uint8Array(r.size);
@@ -5086,20 +5365,102 @@ async function rxOnData(d, fromConn, fromName) {
       out.set(b, off); off += b.length;
     }
     r._buf = out.buffer;
-    // Save to library
-    const ext = r.name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() || 'nes';
-    const sys = SYS[ext] || Object.values(SYS).find(s => s.core === r.core) || { label:r.sysLabel, bg:'#222', fg:'#aaa', core:r.core };
-    const cleanName = r.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
-    await dbPut(META_STORE, { id:makeId(cleanName,r.core), name:cleanName, sysLabel:r.sysLabel,
-      core:r.core, lastPlayed:Date.now(), fileSizeKB:Math.round(r.size/1024), hasRom:true });
-    await dbPut(ROM_STORE, { id:makeId(cleanName,r.core), ext, data:out.buffer });
-    rxMarkDone(d.id);
-    showToast('✅ ' + r.name + ' saved to Library!');
+
+    if (r.kind === 'state') {
+      await rxReceiveState(r);
+    } else if (r.kind === 'file') {
+      // Generic files are never auto-imported anywhere — the person
+      // explicitly clicks "Save to device" when they're ready.
+      rxSetPendingDownload(r.id, r._buf, r.name, r.mime);
+      rxMarkDone(d.id, '⬇ Save to device');
+      showToast('✅ ' + r.name + ' received');
+    } else {
+      // 'rom' (default) — unchanged behaviour: import straight into Library
+      const ext = r.name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() || 'nes';
+      const sys = SYS[ext] || Object.values(SYS).find(s => s.core === r.core) || { label:r.sysLabel, bg:'#222', fg:'#aaa', core:r.core };
+      const cleanName = r.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
+      await dbPut(META_STORE, { id:makeId(cleanName,r.core), name:cleanName, sysLabel:r.sysLabel,
+        core:r.core, lastPlayed:Date.now(), fileSizeKB:Math.round(r.size/1024), hasRom:true });
+      await dbPut(ROM_STORE, { id:makeId(cleanName,r.core), ext, data:out.buffer });
+      rxMarkDone(d.id, '✓ Saved to Library');
+      showToast('✅ ' + r.name + ' saved to Library!');
+    }
+
     if (_rx.isHost && _rx._relayTarget && _rx._relayTarget[d.id]) {
       _rx._relayTarget[d.id].send(d);
       delete _rx._relayTarget[d.id];
     }
   }
+}
+
+/* ── Receiving a save state ───────────────────────────
+   A state is useless without the matching game, and applying it to the
+   WRONG game would silently corrupt that game's Quick Save — so we only
+   ever auto-apply when there's exactly one unambiguous (core + name)
+   match in the recipient's own Library, and even then we ask first.
+   Anything less certain becomes a plain .state file download instead —
+   nothing is ever lost, nothing is ever guessed. */
+async function rxReceiveState(r) {
+  const sep = (r.game || '').indexOf('::');
+  const core = sep >= 0 ? r.game.slice(0, sep) : '';
+  const name = sep >= 0 ? r.game.slice(sep + 2) : (r.game || '');
+  const entries = await dbGetAll(META_STORE).catch(() => []);
+  const matches = entries.filter(e => e.core === core &&
+    e.name.trim().toLowerCase() === name.trim().toLowerCase());
+
+  if (matches.length === 1) {
+    const target = matches[0];
+    const ok = confirm(
+      `Apply this save state to "${target.name}"?\n\n` +
+      `It'll be written to your Quick Save slot, overwriting whatever's ` +
+      `there now. You can still keep the raw file as a backup afterwards.`
+    );
+    if (ok) {
+      await rxWriteStateToSlot(target.id, 0, r);
+      rxMarkDone(r.id, '✓ Applied to ' + target.name);
+      showToast('💾 Applied to ' + target.name + ' — Quick Save slot');
+      return;
+    }
+  }
+
+  // No unambiguous match, or declined — never guess, offer a raw download.
+  const safeName = r.name.replace(/[^\w.\-]+/g, '_');
+  rxSetPendingDownload(r.id, r._buf, safeName.endsWith('.state') ? safeName : safeName + '.state', 'application/octet-stream');
+  rxMarkDone(r.id, '⬇ Save as file');
+  showToast(matches.length
+    ? 'Saved as a file to review — nothing was overwritten'
+    : "ℹ️ You don't have that game yet — saved as a file instead");
+}
+
+async function rxWriteStateToSlot(gameId, slot, r) {
+  const bytes = new Uint8Array(r._buf);
+  const key = ssKey(gameId, slot);
+  const opfsFilename = 'ss_' + key.replace(/[^a-zA-Z0-9_]/g,'_') + '.bin';
+  let savedToOpfs = false;
+  try { await opfsWrite(opfsFilename, r._buf); savedToOpfs = true; } catch(e) {}
+  await dbPut(SS_STORE, {
+    id: key, game: gameId, slot, ts: Date.now(), img: r.thumb || null,
+    opfsFilename: savedToOpfs ? opfsFilename : null,
+    data: savedToOpfs ? null : Array.from(bytes),
+  });
+  if (_currentGame === gameId) renderSlots(); // live-refresh if that game's open right now
+}
+
+// Tracks a "ready to save" download for items that finished transferring
+// but aren't auto-imported anywhere (generic files, and states that
+// couldn't be auto-applied) — the grid button re-triggers this on click.
+function rxSetPendingDownload(id, buf, filename, mime) {
+  _rx.items[id] = _rx.items[id] || {};
+  _rx.items[id]._pendingDownload = { buf, filename, mime };
+}
+
+function rxTriggerBlobDownload(buf, filename, mime) {
+  const blob = new Blob([buf], { type: mime || 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
 function rxShowRoom(code) {
@@ -5121,29 +5482,61 @@ function rxRenderMembers(list) {
   document.getElementById('rx-room-sub').textContent = members.length + ' of ' + RX_MAX + ' members';
 }
 
+function rxKindIcon(r) {
+  if (r.kind === 'state') return '💾';
+  if (r.kind === 'file')  return '📎';
+  return sysIcon(r.core);
+}
+
+function rxCardMeta(r) {
+  if (r.kind === 'state') {
+    const sep = (r.game || '').indexOf('::');
+    const gameName = sep >= 0 ? r.game.slice(sep + 2) : (r.game || 'Unknown game');
+    return `Save state · ${gameName} · ${fmtSize(Math.round(r.size/1024))}`;
+  }
+  if (r.kind === 'file') return `File · ${fmtSize(Math.round(r.size/1024))}`;
+  return `${r.sysLabel} · ${fmtSize(Math.round(r.size/1024))}`;
+}
+
+// Button label + enabled state depends on kind AND whether it finished
+// transferring yet — 'rom' auto-imports and locks the button; 'state'/
+// 'file' land on a "ready to save" state that stays clickable so the
+// person can (re)trigger the actual device download whenever they like.
+function rxCardButton(r) {
+  if (r._buf && (r.kind === 'state' || r.kind === 'file')) {
+    const label = r._pendingDownload ? (r.kind === 'state' ? '⬇ Save as file' : '⬇ Save to device')
+                                      : (r.kind === 'state' ? '✓ Applied — Quick Save' : '✓ Ready — save it below');
+    return `<button class="rx-dl-btn" id="rxbtn-${r.id}" onclick="rxDownload('${r.id}')">${label}</button>`;
+  }
+  const done = !!r._buf;
+  return `<button class="rx-dl-btn ${done?'done':''}" id="rxbtn-${r.id}"
+    onclick="rxDownload('${r.id}')" ${done?'disabled':''}>
+    ${done ? '✓ Saved to Library' : '⬇ Download'}
+  </button>`;
+}
+
 function rxRenderGrid() {
-  const roms = Object.values(_rx.roms);
+  const items = Object.values(_rx.items);
   const empty = document.getElementById('rx-empty');
   const grid  = document.getElementById('rx-grid');
-  if (!roms.length) {
+  if (!items.length) {
     empty.style.display = 'block'; grid.style.display = 'none'; return;
   }
   empty.style.display = 'none'; grid.style.display = 'grid';
-  grid.innerHTML = roms.map(r => `
+  grid.innerHTML = items.map(r => `
     <div class="rx-card" id="rxcard-${r.id}">
       <div class="rx-card-top">
-        <span class="rx-icon">${sysIcon(r.core)}</span>
+        ${r.kind === 'state' && r.thumb
+          ? `<span class="rx-icon" style="width:24px;height:24px;border-radius:4px;overflow:hidden;display:inline-flex"><img src="${r.thumb}" style="width:100%;height:100%;object-fit:cover"></span>`
+          : `<span class="rx-icon">${rxKindIcon(r)}</span>`}
         <div class="rx-info">
           <div class="rx-name" title="${r.name}">${r.name.replace(/\.[^.]+$/,'')}</div>
-          <div class="rx-meta">${r.sysLabel} · ${fmtSize(Math.round(r.size/1024))}</div>
+          <div class="rx-meta">${rxCardMeta(r)}</div>
           <div class="rx-sharer">Shared by ${r.sharerName}</div>
         </div>
       </div>
-      <div class="rx-prog"><div class="rx-prog-fill" id="rxprog-${r.id}" style="width:0%"></div></div>
-      <button class="rx-dl-btn ${r._buf?'done':''}" id="rxbtn-${r.id}"
-        onclick="rxDownload('${r.id}')" ${r._buf?'disabled':''}>
-        ${r._buf ? '✓ Saved to Library' : '⬇ Download'}
-      </button>
+      <div class="rx-prog"><div class="rx-prog-fill" id="rxprog-${r.id}" style="width:${r._buf?100:0}%"></div></div>
+      ${rxCardButton(r)}
     </div>`).join('');
 }
 
@@ -5155,30 +5548,44 @@ function rxUpdateCard(id, pct, label) {
   else if (btn && pct > 0 && pct < 100) btn.textContent = '⬇ ' + pct + '%';
 }
 
-function rxMarkDone(id) {
-  const btn  = document.getElementById('rxbtn-'+id);
-  const prog = document.getElementById('rxprog-'+id);
-  if (btn) { btn.textContent = '✓ Saved to Library'; btn.className = 'rx-dl-btn done'; btn.disabled = true; }
-  if (prog) prog.style.width = '100%';
+function rxMarkDone(id, label) {
+  rxRenderGrid(); // re-render so this card picks up its kind-specific button/state
 }
 
 async function rxDownload(id) {
-  const r = _rx.roms[id];
+  const r = _rx.items[id];
   if (!r) return;
-  // If we have the file locally (we shared it), just save it
-  if (r._buf) { showToast('Already in Library!'); return; }
-  // Request from whoever shared it
-  // For simplicity: if host, ask all conns; joiner, ask host conn
-  const req = { type:'rom-req', id };
+
+  // Already finished transferring — resolve locally, no network needed.
+  if (r._buf) {
+    if (r.kind === 'rom') { showToast('Already in Library!'); return; }
+    if (r._pendingDownload) {
+      rxTriggerBlobDownload(r._pendingDownload.buf, r._pendingDownload.filename, r._pendingDownload.mime);
+      return;
+    }
+    if (r.kind === 'file') {
+      rxTriggerBlobDownload(r._buf, r.name, r.mime); return;
+    }
+    if (r.kind === 'state') { showToast('Already applied to your Library!'); return; }
+    return;
+  }
+
+  // Not downloaded yet — request from whoever shared it.
+  // For simplicity: if host, ask all conns; joiner, ask host conn.
+  const req = { type:'item-req', id };
   if (_rx.isHost) {
-    // Find the conn of the sharer by name
     rxSendAll(req);
   } else {
-    // Ask host to relay
     const conn = _rx.conns[0];
-    if (conn && conn.open) conn.send({ type:'rom-req', id });
+    if (conn && conn.open) conn.send(req);
   }
   rxUpdateCard(id, 0, 'Requesting…');
+}
+
+function rxAnnounce(item) {
+  _rx.items[item.id] = { ...item, chunks: [], rcvd: 0, total: 0 };
+  rxSendAll({ type:'item-announce', item: rxItemMeta(item) });
+  rxRenderGrid();
 }
 
 async function rxShareFile(file) {
@@ -5188,14 +5595,25 @@ async function rxShareFile(file) {
   if (!sys) { if (!AMBIGUOUS_EXT[ext]) showToast('⚠️ Unsupported format'); return; }
   const id = Date.now() + '-' + Math.random().toString(36).slice(2);
   const buf = await file.arrayBuffer();
-  const rom = {
-    id, name: file.name, sysLabel: sys.label, core: sys.core,
+  rxAnnounce({
+    id, kind:'rom', name: file.name, sysLabel: sys.label, core: sys.core,
     size: file.size, sharerName: _rx.myName, _buf: buf,
-  };
-  _rx.roms[id] = { ...rom, chunks: [], rcvd: 0, total: 0 };
-  const meta = rxRomMeta(rom);
-  rxSendAll({ type:'rom-announce', rom: meta });
-  rxRenderGrid();
+  });
+  showToast('📤 Shared: ' + file.name);
+}
+
+// Generic "share anything" lane — deliberately does NOT validate the
+// extension against SYS at all. This is the catch-all for screenshots,
+// cheat files, BIOS dumps, zipped configs, or anything else that isn't
+// a ROM or a save state.
+async function rxShareRawFile(file) {
+  if (!file) return;
+  const id = Date.now() + '-' + Math.random().toString(36).slice(2);
+  const buf = await file.arrayBuffer();
+  rxAnnounce({
+    id, kind:'file', name: file.name, mime: file.type || 'application/octet-stream',
+    size: file.size, sharerName: _rx.myName, _buf: buf,
+  });
   showToast('📤 Shared: ' + file.name);
 }
 
@@ -5209,18 +5627,70 @@ async function rxShareFromLibrary() {
     if (r) {
       const id = Date.now() + '-' + Math.random().toString(36).slice(2);
       const ext = r.ext || 'nes';
-      const rom = {
-        id, name: e.name + '.' + ext, sysLabel: e.sysLabel, core: e.core,
+      rxAnnounce({
+        id, kind:'rom', name: e.name + '.' + ext, sysLabel: e.sysLabel, core: e.core,
         size: r.data.byteLength || r.data.length, sharerName: _rx.myName, _buf: r.data,
-      };
-      _rx.roms[id] = { ...rom, chunks: [], rcvd: 0, total: 0 };
-      rxSendAll({ type:'rom-announce', rom: rxRomMeta(rom) });
-      rxRenderGrid();
+      });
       showToast('📤 Shared from library: ' + e.name);
       return;
     }
   }
   showToast('⚠️ No stored ROMs found in library');
+}
+
+/* ── Save-state picker (💾 Share a Save State) ────────
+   Reuses SS_STORE directly — every save state's `game` field is already
+   the same `core::name` composite id used everywhere else (makeId(),
+   _currentGame), so no extra lookup is needed to recover the core. */
+async function rxOpenStatePicker() {
+  const all = await dbGetAll(SS_STORE).catch(() => []);
+  const list = document.getElementById('state-pick-list');
+  if (!all.length) {
+    list.innerHTML = `<div class="state-pick-empty">No save states yet — save one from a game first, then come back here.</div>`;
+  } else {
+    all.sort((a,b) => b.ts - a.ts);
+    list.innerHTML = all.map(s => {
+      const sep = s.game.indexOf('::');
+      const gameName = sep >= 0 ? s.game.slice(sep + 2) : s.game;
+      const slotLabel = s.slot === 0 ? 'Quick Save' : 'Slot ' + s.slot;
+      return `<div class="state-pick-item" onclick="rxShareStateEntry('${s.id.replace(/'/g,"\\'")}')">
+        <div class="state-pick-thumb">${s.img ? `<img src="${s.img}">` : '💾'}</div>
+        <div class="state-pick-info">
+          <div class="state-pick-name">${gameName}</div>
+          <div class="state-pick-meta">${slotLabel} · ${timeAgo(s.ts)}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  document.getElementById('state-picker-modal').classList.add('open');
+}
+
+function closeStatePicker() {
+  document.getElementById('state-picker-modal').classList.remove('open');
+}
+
+async function rxShareStateEntry(entryId) {
+  const entry = await dbGet(SS_STORE, entryId).catch(() => null);
+  closeStatePicker();
+  if (!entry) { showToast('⚠️ Could not read that save state'); return; }
+
+  let bytes = null;
+  if (entry.opfsFilename) {
+    const buf = await opfsRead(entry.opfsFilename).catch(() => null);
+    if (buf) bytes = new Uint8Array(buf);
+  }
+  if (!bytes && entry.data && entry.data.length) bytes = new Uint8Array(entry.data);
+  if (!bytes || !bytes.length) { showToast('⚠️ Could not read that save state'); return; }
+
+  const sep = entry.game.indexOf('::');
+  const gameName = sep >= 0 ? entry.game.slice(sep + 2) : entry.game;
+  const id = Date.now() + '-' + Math.random().toString(36).slice(2);
+  rxAnnounce({
+    id, kind:'state', name: gameName + '.state', game: entry.game, slot: entry.slot,
+    thumb: entry.img || null, size: bytes.byteLength, sharerName: _rx.myName,
+    _buf: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  });
+  showToast('📤 Shared save state: ' + gameName);
 }
 
 function rxSendChat() {
@@ -5251,7 +5721,7 @@ function rxCopyCode() {
 function rxLeave() {
   if (_rx.peer) { try { _rx.peer.destroy(); } catch(e) {} _rx.peer = null; }
   _rx.conns.forEach(c => { if(c) try { c.close(); } catch(e) {} });
-  _rx = { peer:null, isHost:false, code:null, conns:[], myName:null, memberNames:{}, roms:{} };
+  _rx = { peer:null, isHost:false, code:null, conns:[], myName:null, memberNames:{}, items:{} };
   document.getElementById('rx-lobby').style.display = 'block';
   document.getElementById('rx-room').style.display = 'none';
   document.getElementById('rx-code-input').value = '';
@@ -5261,6 +5731,11 @@ function rxLeave() {
 
 document.getElementById('rx-file-inp').addEventListener('change', e => {
   rxShareFile(e.target.files[0]);
+  e.target.value = '';
+});
+
+document.getElementById('rx-anyfile-inp').addEventListener('change', e => {
+  rxShareRawFile(e.target.files[0]);
   e.target.value = '';
 });
 
@@ -6483,7 +6958,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260906220830';
+const APP_VERSION = '20260908150000';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
