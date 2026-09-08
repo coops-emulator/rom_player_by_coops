@@ -2394,17 +2394,11 @@ body.game-active .wrap {
           </div>
           <div class="rx-members" id="rx-members"></div>
           <div class="rx-upload-bar">
-            <button class="rx-btn accent" style="flex:1 1 auto" onclick="document.getElementById('rx-file-inp').click()" title="Share a ROM file">
-              📂 Share a ROM
-            </button>
-            <button class="rx-btn" onclick="rxShareFromLibrary()" title="Share your most recently played ROM straight from your Library">Share from Library</button>
-            <button class="rx-btn" onclick="rxOpenStatePicker()" title="Share a save state so a friend can continue right where you left off">💾 Share a Save State</button>
-            <button class="rx-btn" onclick="document.getElementById('rx-anyfile-inp').click()" title="Share any other file — screenshots, cheat files, BIOS files, archives, anything">📎 Share a File</button>
-            <input type="file" id="rx-file-inp" style="display:none"
-              accept=".nes,.smc,.sfc,.gba,.gb,.gbc,.z64,.n64,.v64,.md,.gen,.bin,.cue,.iso,.cso,.pce,.ws,.wsc,.vb,.nds,.32x,.gg,.sms,.ngp,.ngc,.a26,.col,.int,.vec,.elf,.pbp,.sat,.chd,.s32,.scd,.neo,.ngeo,.lynx,.atl,.msx">
-            <!-- Deliberately no `accept` filter — this lane is the generic
-                 catch-all for anything that ISN'T a ROM or a save state
-                 (screenshots, cheat files, BIOS dumps, zipped configs…). -->
+            <button class="rx-btn accent" style="flex:1 1 auto" onclick="rxOpenStatePicker()" title="Share a save state so a friend can continue right where you left off">💾 Share a Save State</button>
+            <button class="rx-btn" onclick="document.getElementById('rx-anyfile-inp').click()" title="Share any other file — screenshots, cheat files, config exports, anything">📎 Share a File</button>
+            <!-- No `accept` filter — this lane is the generic catch-all for
+                 anything that isn't a save state (screenshots, cheat files,
+                 zipped configs…). -->
             <input type="file" id="rx-anyfile-inp" style="display:none">
           </div>
           <div id="rx-grid-wrap">
@@ -2912,7 +2906,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260908150000"></script>
+<script src="emulator-backbone.js?v=20260908183000"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -3181,8 +3175,15 @@ function applyTheme(id, fromStartup) {
     renderThemesGrid();
     savePrefsToCloud();
     if (!fromStartup) _themeBloom();
-    // Auto-close premium panel after selection
-    setPremiumPanelOpen(false);
+    // Auto-close premium panel after an actual user selection only.
+    // fromStartup=true means this call came from _updatePremiumUI's
+    // periodic anti-tamper reconciliation re-asserting whatever theme
+    // was ALREADY active (see PREMIUM RECONCILIATION below) — nothing
+    // was actually selected, so closing the panel (or, worse, the open
+    // custom editor underneath it) out from under someone mid-edit was
+    // the bug where the panel/editor appeared to close itself after
+    // about a second for no reason.
+    if (!fromStartup) setPremiumPanelOpen(false);
     return;
   }
 
@@ -3204,8 +3205,8 @@ function applyTheme(id, fromStartup) {
   renderThemesGrid();
   savePrefsToCloud();
   if (!fromStartup) _themeBloom();
-  // Auto-close premium panel after selection
-  if (t && t.premium) setPremiumPanelOpen(false);
+  // See the comment above the 'custom' branch — same fix, same reason.
+  if (!fromStartup && t && t.premium) setPremiumPanelOpen(false);
 }
 
 // Full-screen radial flash on theme switch, ported from the showcase's
@@ -3235,6 +3236,19 @@ function togglePremiumThemes() {
 }
 
 function renderThemesGrid() {
+  // Don't rebuild out from under an in-progress custom-theme edit. This
+  // function gets re-run every couple of seconds by the premium-status
+  // reconciliation loop (PREMIUM RECONCILIATION, below) purely to refresh
+  // lock icons if premium status changed — it wasn't meant to nuke the
+  // editor's live DOM (sliders, unsaved hex values, cursor focus) while
+  // someone's actually using it. That silent wipe was the "custom slider
+  // picker just closes after about a second" bug. Skipping the rebuild
+  // while .open is set is safe: the editor already live-previews every
+  // change itself (see _livePreviewCustom), and Save/Cancel each close
+  // the editor explicitly before anything would need this grid rebuilt.
+  const openEditor = document.getElementById('custom-theme-editor');
+  if (openEditor && openEditor.classList.contains('open')) return;
+
   const freeEl    = document.getElementById('themes-grid-free');
   const premiumEl = document.getElementById('themes-grid-premium');
   const customSlot= document.getElementById('custom-theme-slot');
@@ -4909,16 +4923,13 @@ document.getElementById('relaunch-modal').addEventListener('click', function(e) 
   if (e.target === this) closeRelaunchModal();
 });
 
-/* ══ ROM EXCHANGE (Linkup Room) ═══════════════════════
+/* ══ LINKUP ROOM — FILE SHARING ═══════════════════════
    P2P room: host creates code, up to 4 peers join.
-   Anyone can share ROMs, save states, or arbitrary files.
+   Anyone can share a save state or an arbitrary file.
    Everything transfers directly peer-to-peer in chunks —
    nothing ever touches a server.
 
    Every shared thing is an "item" with a `kind`:
-     'rom'   — a game file. Unchanged behaviour: on receipt
-               it's imported straight into the recipient's
-               Library.
      'state' — an EmulatorJS save-state blob (see SAVE STATES
                section below). On receipt we try to match it
                to a game the recipient ALREADY owns (same
@@ -4929,16 +4940,20 @@ document.getElementById('relaunch-modal').addEventListener('click', function(e) 
                offered as a plain .state file download instead
                — never silently dropped, never silently
                guessed onto the wrong game.
-     'file'  — anything else (screenshots, cheat files, BIOS
-               dumps, zipped configs…). No validation at all;
-               just a peer-to-peer blob the recipient can save
-               straight to their device. Never touches the ROM
-               library or IndexedDB.
+     'file'  — anything else (screenshots, cheat files,
+               zipped configs…). No validation at all; just a
+               peer-to-peer blob the recipient can save straight
+               to their device. Never touches IndexedDB.
+
+   Note: a legacy 'rom' kind is still recognised on receipt for
+   backwards compatibility with anything sent by an older build,
+   but nothing in this client's UI can send one any more — there
+   is no "share a ROM" entry point in this room.
 
    The wire protocol (item-announce/item-req/item-chunk/…) is
-   identical for all three kinds — only the metadata riding
-   alongside the bytes, and what happens once the bytes finish
-   reassembling on the other end, differs by kind.
+   identical for both kinds — only the metadata riding alongside
+   the bytes, and what happens once the bytes finish reassembling
+   on the other end, differs by kind.
 ═══════════════════════════════════════════════════ */
 const RX_MAX = 4;
 const RX_CHUNK = 65536;
@@ -4950,18 +4965,17 @@ let _rx = {
   conns:   [],       // DataConnection[]
   myName:  null,     // your display name (from getUsername())
   memberNames: {},   // idx -> their chosen display name (host-tracked)
-  items:   {},       // id → { id, kind:'rom'|'state'|'file', name, size, sharerName,
-                      //        sysLabel?, core?,           -- kind:'rom'
+  items:   {},       // id → { id, kind:'state'|'file', name, size, sharerName,
                       //        game?, slot?, thumb?,        -- kind:'state'
                       //        mime?,                       -- kind:'file'
                       //        chunks?, rcvd?, total?, _buf? }
 };
 
-/* ══ USERNAME (ROM Exchange identity) ═══════════════ */
+/* ══ USERNAME (Linkup Room identity) ═══════════════════ */
 // Username — stored in IDB prefs. Sync fallback reads localStorage
 // for the brief window before _storageReadyPromise resolves.
 function getUsername() {
-  // Sync path — used by ROM Exchange which needs immediate access.
+  // Sync path — used by Linkup Room which needs immediate access.
   // Falls back to a cached value set during initStorage.
   return window._cachedUsername || ('Player' + Math.floor(1000 + Math.random() * 9000));
 }
@@ -5590,24 +5604,6 @@ function rxAnnounce(item) {
 
 async function rxShareFile(file) {
   if (!file) return;
-  const ext = file.name.split('.').pop().toLowerCase();
-  const sys = await resolveSysForExt(ext);
-  if (!sys) { if (!AMBIGUOUS_EXT[ext]) showToast('⚠️ Unsupported format'); return; }
-  const id = Date.now() + '-' + Math.random().toString(36).slice(2);
-  const buf = await file.arrayBuffer();
-  rxAnnounce({
-    id, kind:'rom', name: file.name, sysLabel: sys.label, core: sys.core,
-    size: file.size, sharerName: _rx.myName, _buf: buf,
-  });
-  showToast('📤 Shared: ' + file.name);
-}
-
-// Generic "share anything" lane — deliberately does NOT validate the
-// extension against SYS at all. This is the catch-all for screenshots,
-// cheat files, BIOS dumps, zipped configs, or anything else that isn't
-// a ROM or a save state.
-async function rxShareRawFile(file) {
-  if (!file) return;
   const id = Date.now() + '-' + Math.random().toString(36).slice(2);
   const buf = await file.arrayBuffer();
   rxAnnounce({
@@ -5615,27 +5611,6 @@ async function rxShareRawFile(file) {
     size: file.size, sharerName: _rx.myName, _buf: buf,
   });
   showToast('📤 Shared: ' + file.name);
-}
-
-async function rxShareFromLibrary() {
-  const entries = await dbGetAll(META_STORE).catch(() => []);
-  if (!entries.length) { showToast('⚠️ No ROMs in library'); return; }
-  // Pick most recent with stored ROM
-  entries.sort((a,b) => b.lastPlayed - a.lastPlayed);
-  for (const e of entries) {
-    const r = await dbGet(ROM_STORE, makeId(e.name, e.core)).catch(() => null);
-    if (r) {
-      const id = Date.now() + '-' + Math.random().toString(36).slice(2);
-      const ext = r.ext || 'nes';
-      rxAnnounce({
-        id, kind:'rom', name: e.name + '.' + ext, sysLabel: e.sysLabel, core: e.core,
-        size: r.data.byteLength || r.data.length, sharerName: _rx.myName, _buf: r.data,
-      });
-      showToast('📤 Shared from library: ' + e.name);
-      return;
-    }
-  }
-  showToast('⚠️ No stored ROMs found in library');
 }
 
 /* ── Save-state picker (💾 Share a Save State) ────────
@@ -5729,13 +5704,8 @@ function rxLeave() {
   if (log) log.innerHTML = '';
 }
 
-document.getElementById('rx-file-inp').addEventListener('change', e => {
-  rxShareFile(e.target.files[0]);
-  e.target.value = '';
-});
-
 document.getElementById('rx-anyfile-inp').addEventListener('change', e => {
-  rxShareRawFile(e.target.files[0]);
+  rxShareFile(e.target.files[0]);
   e.target.value = '';
 });
 
@@ -6958,7 +6928,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260908150000';
+const APP_VERSION = '20260908183000';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -8510,10 +8480,9 @@ if ('serviceWorker' in navigator) {
   <div style="background:var(--surf);border:1px solid var(--border);border-radius:18px;padding:28px 24px;max-width:380px;width:90%;margin:0 16px">
     <h3 style="margin:0 0 16px;font-size:16px;color:var(--text)">Linkup Room Policy</h3>
     <div style="font-size:13px;color:var(--muted);line-height:1.7;display:flex;flex-direction:column;gap:8px">
-      <div>📡 This feature acts as a temporary P2P data transfer utility.</div>
+      <div>📡 This feature acts as a temporary P2P data transfer utility for save states and files.</div>
       <div>🚫 No files are stored, cached, or hosted on our servers.</div>
-      <div>⚖️ Sharing commercial copyrighted software is strictly prohibited.</div>
-      <div>✅ Users must only share legally owned backups or authorised open-source homebrew software.</div>
+      <div>⚖️ You're responsible for only sharing content you have the right to share.</div>
     </div>
     <button onclick="document.getElementById('linkup-disclaimer-modal').style.display='none'"
       class="rx-btn accent" style="width:100%;margin-top:20px;padding:12px">I Understand</button>
