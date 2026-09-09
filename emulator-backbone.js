@@ -54,30 +54,15 @@
     gameGear:     { label: "Game Gear",       system: "segaGG",      cores: ["genesis_plus_gx"],           extensions: ["gg"],                          bios: null, verified: true },
     masterSystem: { label: "Master System",   system: "segaMS",      cores: ["smsplus", "genesis_plus_gx"], extensions: ["sms"],                        bios: null, verified: true },
     psx:          { label: "PS1",             system: "psx",         cores: ["mednafen_psx_hw", "pcsx_rearmed"], extensions: ["cue", "chd", "pbp", "iso"], bios: { required: false, files: ["scph5501.bin", "scph5500.bin", "scph5502.bin"] }, verified: true },
-    // PSP: forceLegacyCores is a deliberate, user-confirmed audio fix, not a
-    // guess. EJS_forceLegacyCores forces EmulatorJS's separate WebGL1 core
-    // build instead of the default WebGL2 one — that's a genuinely different
-    // compiled WASM artifact, not just a rendering-path flag, and it turned
-    // out to bundle a different/older audio backend than the default
-    // (non-legacy) ppsspp build. Confirmed by direct A/B test (2026-09-08):
-    // default build → persistent audio grain/static during ordinary
-    // gameplay with video completely smooth (isolates the bug to the audio
-    // backend specifically, not general performance); same ROM, same
-    // device, EJS_forceLegacyCores=true → clean audio, no other regression
-    // noticed. Matches a known upstream EmulatorJS issue (audio static in
-    // Chrome/Safari's WebAudio bridge, EmulatorJS/EmulatorJS#739) that the
-    // legacy build apparently isn't affected by. Combines fine with
-    // requiresThreads above — both flags were active together in the
-    // confirmed-working test, so this app doesn't have to choose one or
-    // the other for PSP.
-    // disableCoreCache: switching which core build gets requested means
-    // anyone whose browser already cached the OLD (non-legacy) PPSSPP core
-    // will hit EmulatorJS's own "Outdated Core" guard on their first PSP
-    // load after this change — see loadGame() below for the full
-    // explanation. Forcing a fresh network fetch for PSP specifically
-    // (instead of ever risking a stale cached core) makes that a non-issue
-    // for every player, not just something a hard reload fixes once.
-    psp:          { label: "PSP",             system: "psp",         cores: ["ppsspp"],                    extensions: ["iso", "cso", "pbp"],           bios: { required: false, file: "PPSSPP_BIOS.bin" }, verified: true, requiresThreads: true, forceLegacyCores: true, disableCoreCache: true },
+    // PSP audio note: forcing the legacy (WebGL1) core was tested as a fix
+    // for persistent audio grain during normal gameplay, but on at least
+    // one real device it caused a hard "Outdated graphics driver" boot
+    // failure instead — worse than the original problem. That's a real,
+    // reproduced regression, not a config quirk, so it's NOT forced here.
+    // See PSP_LEGACY_CORE_PREF below: it's exposed as an opt-in Settings
+    // toggle instead, so it can be tried and reverted per-device without
+    // risking every player's ability to boot PSP at all.
+    psp:          { label: "PSP",             system: "psp",         cores: ["ppsspp"],                    extensions: ["iso", "cso", "pbp"],           bios: { required: false, file: "PPSSPP_BIOS.bin" }, verified: true, requiresThreads: true },
     nds:          { label: "NDS",             system: "nds",         cores: ["melonds", "desmume2015"],    extensions: ["nds"],                         bios: { required: false, files: ["bios7.bin", "bios9.bin", "firmware.bin"] }, verified: true },
     atari2600:    { label: "Atari 2600",      system: "atari2600",   cores: ["stella2014"],                extensions: ["a26", "bin"],                  bios: null, verified: true },
     atari7800:    { label: "Atari 7800",      system: "atari7800",   cores: ["prosystem"],                 extensions: ["a78", "bin"],                  bios: null, verified: true },
@@ -290,29 +275,20 @@
       // case, or a previous game's flag value leaks into this boot since
       // this app never does a full page reload between games.
       window.EJS_threads = !!cfg.requiresThreads;
-      window.EJS_forceLegacyCores = !!cfg.forceLegacyCores;
-
-      // PSP-specific: this app just switched which PPSSPP core build gets
-      // requested (see forceLegacyCores above — confirmed fix for
-      // persistent audio grain during normal PSP gameplay, verified by
-      // direct A/B test 2026-09-08). Any player whose browser already has
-      // the OLD (non-legacy) core cached in EmulatorJS's own IndexedDB
-      // store from a previous session will hit EmulatorJS's built-in
-      // "Outdated Core" version-mismatch guard the first time they load
-      // PSP after this update — that's EmulatorJS correctly refusing to
-      // run an old cached core against a newer/different one it wasn't
-      // compiled to match, not a bug in this fix. Confirmed by our own
-      // testing: a genuine hard-reload (which bypasses that stale
-      // IndexedDB entry) resolved it immediately with clean audio.
-      // window.EJS_cacheConfig.enabled=false is EmulatorJS's own
-      // documented, official switch for exactly this (see the "enabled"
-      // field in EJS's reference index.html) — setting it for PSP only
-      // forces every PSP boot to fetch the core fresh over the network
-      // instead of ever touching a potentially-stale cached copy, so
-      // nobody has to know to hard-reload. Every other system keeps
-      // caching (the flag is explicitly true/false per system, same leak-
-      // avoidance reasoning as EJS_threads/EJS_forceLegacyCores above).
-      window.EJS_cacheConfig = { enabled: !cfg.disableCoreCache };
+      // opts.forceLegacyCores (NOT cfg.forceLegacyCores) — this is a
+      // per-launch opt-in the caller passes explicitly, never a blanket
+      // per-system default. See the PSP audio-grain note in CORE_REGISTRY
+      // above for why: forcing this broke PSP boot entirely on at least
+      // one real device ("Outdated graphics driver"), so it's surfaced as
+      // a Settings toggle the player can try and immediately revert,
+      // rather than something this library silently forces on everyone.
+      window.EJS_forceLegacyCores = !!opts.forceLegacyCores;
+      // Core cache is only disabled for this one launch when the caller
+      // is actively toggling forceLegacyCores — that's the one situation
+      // where a previously-cached core of the OTHER variant could trigger
+      // EmulatorJS's own "Outdated Core" mismatch guard. Normal launches
+      // keep caching on for fast subsequent boots.
+      window.EJS_cacheConfig = { enabled: !opts.forceLegacyCores };
 
       const gameName = opts.gameName || this._deriveGameName(rom);
       if (gameName) {
