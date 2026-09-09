@@ -2783,6 +2783,15 @@ body.game-active .wrap {
           <button class="rx-btn" id="crt-toggle-btn" onclick="toggleCrtEffect()" style="flex-shrink:0">On</button>
         </div>
 
+        <!-- PSP experimental legacy core (audio grain workaround) -->
+        <div class="settings-app-row" style="margin-top:12px">
+          <div class="settings-app-info">
+            <div class="settings-app-label">PSP: Try Legacy Graphics Core</div>
+            <div class="settings-app-sub">Experimental — may fix grainy audio during gameplay, but has caused games to fail to boot ("Outdated graphics driver") on some devices. Off by default; safe to flip back off any time.</div>
+          </div>
+          <button class="rx-btn" id="psp-legacy-toggle-btn" onclick="toggleLegacyPspCore()" style="flex-shrink:0">Off</button>
+        </div>
+
       </div>
 
     </div>
@@ -2906,7 +2915,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260909013000"></script>
+<script src="emulator-backbone.js?v=20260909034500"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -3656,6 +3665,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.documentElement.classList.toggle('crt-off', !!crtOff);
   const crtBtn = document.getElementById('crt-toggle-btn');
   if (crtBtn) crtBtn.textContent = crtOff ? 'Off' : 'On';
+
+  // PSP experimental legacy core — reflect saved preference in the toggle
+  // button label. Defaults to false (off) — see toggleLegacyPspCore().
+  const pspLegacyOn = await prefGet('rp-psp-legacy-core', false);
+  const pspLegacyBtn = document.getElementById('psp-legacy-toggle-btn');
+  if (pspLegacyBtn) pspLegacyBtn.textContent = pspLegacyOn ? 'On' : 'Off';
 });
 
 /* ══ CRT SCREEN TEXTURE TOGGLE ═══════════════════════
@@ -3670,6 +3685,27 @@ async function toggleCrtEffect() {
   const btn = document.getElementById('crt-toggle-btn');
   if (btn) btn.textContent = isOff ? 'Off' : 'On';
   showToast(isOff ? '🖥️ CRT texture off' : '🖥️ CRT texture on');
+}
+
+/* ══ PSP EXPERIMENTAL LEGACY CORE TOGGLE ═════════════
+   EJS_forceLegacyCores was tested as a fix for persistent audio grain
+   during normal PSP gameplay (see launch() above) — it genuinely fixed
+   audio on one device, but caused a hard "Outdated graphics driver" boot
+   failure on another. That's a real per-device compatibility split, not
+   something this app can safely default on or off for everyone. Exposed
+   here as an explicit, reversible opt-in instead: takes effect on the
+   NEXT PSP launch (it's read once at boot time in launch(), not live-
+   patchable into an already-running core), defaults to off (the state
+   that's confirmed to at least boot reliably everywhere tested so far). */
+async function toggleLegacyPspCore() {
+  const wasOn = await prefGet('rp-psp-legacy-core', false);
+  const nowOn = !wasOn;
+  await prefSet('rp-psp-legacy-core', nowOn);
+  const btn = document.getElementById('psp-legacy-toggle-btn');
+  if (btn) btn.textContent = nowOn ? 'On' : 'Off';
+  showToast(nowOn
+    ? '🧪 Legacy PSP core on — takes effect next time you launch a PSP game'
+    : '🧪 Legacy PSP core off — takes effect next time you launch a PSP game');
 }
 
 /* ══ HEADER CLOCK ════════════════════════════════════ */
@@ -6042,12 +6078,22 @@ async function launch(romUrl, sys, name, file) {
       try {
         _engine = new backbone.EmulatorEngine(document.getElementById('game'), engineOpts);
         _engine.onGameStart(onGameStart);
+        // PSP-only, opt-in: EJS_forceLegacyCores was tested as a fix for
+        // persistent audio grain during normal PSP gameplay, but it caused
+        // a hard "Outdated graphics driver" boot failure on at least one
+        // real device — worse than the grain it was meant to fix. Rather
+        // than force it on everyone (or nobody), it's a Settings toggle
+        // (see toggleLegacyPspCore()) so it can be tried and immediately
+        // reverted per-device. Defaults to off — the known-boots-reliably
+        // state — until someone explicitly opts in from Settings.
+        const tryLegacyPsp = sys.ejsSystem === 'psp' && await prefGet('rp-psp-legacy-core', false);
         await _engine.loadGame(sys.ejsSystem, romUrl, {
           gameName: name,
           color: accentColor,
           backgroundColor: '#000000',
           biosUrl: biosUrl || undefined,
           rewind: true, // uses backbone.getRewindProfile(sys.ejsSystem)
+          forceLegacyCores: tryLegacyPsp,
         });
       } catch (err) {
         console.error('[launch]', err);
@@ -7011,7 +7057,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260909013000';
+const APP_VERSION = '20260909034500';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
