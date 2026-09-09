@@ -2783,15 +2783,6 @@ body.game-active .wrap {
           <button class="rx-btn" id="crt-toggle-btn" onclick="toggleCrtEffect()" style="flex-shrink:0">On</button>
         </div>
 
-        <!-- PSP experimental legacy core (audio grain workaround) -->
-        <div class="settings-app-row" style="margin-top:12px">
-          <div class="settings-app-info">
-            <div class="settings-app-label">PSP: Try Legacy Graphics Core</div>
-            <div class="settings-app-sub">Experimental — may fix grainy audio during gameplay, but has caused games to fail to boot ("Outdated graphics driver") on some devices. Off by default; safe to flip back off any time.</div>
-          </div>
-          <button class="rx-btn" id="psp-legacy-toggle-btn" onclick="toggleLegacyPspCore()" style="flex-shrink:0">Off</button>
-        </div>
-
       </div>
 
     </div>
@@ -2915,7 +2906,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260909034500"></script>
+<script src="emulator-backbone.js?v=20260909114500"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -3665,12 +3656,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.documentElement.classList.toggle('crt-off', !!crtOff);
   const crtBtn = document.getElementById('crt-toggle-btn');
   if (crtBtn) crtBtn.textContent = crtOff ? 'Off' : 'On';
-
-  // PSP experimental legacy core — reflect saved preference in the toggle
-  // button label. Defaults to false (off) — see toggleLegacyPspCore().
-  const pspLegacyOn = await prefGet('rp-psp-legacy-core', false);
-  const pspLegacyBtn = document.getElementById('psp-legacy-toggle-btn');
-  if (pspLegacyBtn) pspLegacyBtn.textContent = pspLegacyOn ? 'On' : 'Off';
 });
 
 /* ══ CRT SCREEN TEXTURE TOGGLE ═══════════════════════
@@ -3685,27 +3670,6 @@ async function toggleCrtEffect() {
   const btn = document.getElementById('crt-toggle-btn');
   if (btn) btn.textContent = isOff ? 'Off' : 'On';
   showToast(isOff ? '🖥️ CRT texture off' : '🖥️ CRT texture on');
-}
-
-/* ══ PSP EXPERIMENTAL LEGACY CORE TOGGLE ═════════════
-   EJS_forceLegacyCores was tested as a fix for persistent audio grain
-   during normal PSP gameplay (see launch() above) — it genuinely fixed
-   audio on one device, but caused a hard "Outdated graphics driver" boot
-   failure on another. That's a real per-device compatibility split, not
-   something this app can safely default on or off for everyone. Exposed
-   here as an explicit, reversible opt-in instead: takes effect on the
-   NEXT PSP launch (it's read once at boot time in launch(), not live-
-   patchable into an already-running core), defaults to off (the state
-   that's confirmed to at least boot reliably everywhere tested so far). */
-async function toggleLegacyPspCore() {
-  const wasOn = await prefGet('rp-psp-legacy-core', false);
-  const nowOn = !wasOn;
-  await prefSet('rp-psp-legacy-core', nowOn);
-  const btn = document.getElementById('psp-legacy-toggle-btn');
-  if (btn) btn.textContent = nowOn ? 'On' : 'Off';
-  showToast(nowOn
-    ? '🧪 Legacy PSP core on — takes effect next time you launch a PSP game'
-    : '🧪 Legacy PSP core off — takes effect next time you launch a PSP game');
 }
 
 /* ══ HEADER CLOCK ════════════════════════════════════ */
@@ -6078,22 +6042,12 @@ async function launch(romUrl, sys, name, file) {
       try {
         _engine = new backbone.EmulatorEngine(document.getElementById('game'), engineOpts);
         _engine.onGameStart(onGameStart);
-        // PSP-only, opt-in: EJS_forceLegacyCores was tested as a fix for
-        // persistent audio grain during normal PSP gameplay, but it caused
-        // a hard "Outdated graphics driver" boot failure on at least one
-        // real device — worse than the grain it was meant to fix. Rather
-        // than force it on everyone (or nobody), it's a Settings toggle
-        // (see toggleLegacyPspCore()) so it can be tried and immediately
-        // reverted per-device. Defaults to off — the known-boots-reliably
-        // state — until someone explicitly opts in from Settings.
-        const tryLegacyPsp = sys.ejsSystem === 'psp' && await prefGet('rp-psp-legacy-core', false);
         await _engine.loadGame(sys.ejsSystem, romUrl, {
           gameName: name,
           color: accentColor,
           backgroundColor: '#000000',
           biosUrl: biosUrl || undefined,
           rewind: true, // uses backbone.getRewindProfile(sys.ejsSystem)
-          forceLegacyCores: tryLegacyPsp,
         });
       } catch (err) {
         console.error('[launch]', err);
@@ -6306,84 +6260,12 @@ async function captureScreenshot() {
 
 function ssKey(game, slot) { return 'ss::' + game + '::' + slot; }
 
-// Set while a save-state save/load is actually touching the core (i.e.
-// between the moment we start and the moment gm.getState()/gm.loadState()
-// has fully returned and the core's had a couple of frames to resettle).
-// Two jobs:
-//  1) Blocks re-entrancy — gm.getState()/gm.loadState() are fully
-//     SYNCHRONOUS calls. A rapid double-tap on a slot button (or tapping
-//     a second slot while the first is still resolving its async
-//     OPFS/IDB read) could otherwise fire a second heavy call while the
-//     core is mid-resync from the first, which would only compound the
-//     exact hitch this fix is trying to remove.
-//  2) Lets renderSlots() grey out every slot button while true, so the
-//     brief stall reads as "the app is doing something" instead of "the
-//     app just glitched" — a save/load doesn't get materially faster,
-//     but it stops feeling broken.
-let _stateOpInProgress = false;
-
-// Root cause of the "gameplay felt delayed and audio went grainy after
-// loading a save state" reports (most visible on PSP, where states run
-// into the tens of megabytes): gm.getState()/gm.loadState() are fully
-// SYNCHRONOUS — on a big, data-heavy state they block the main thread for
-// a real stretch while the core serialises/deserialises. The audio
-// hardware doesn't know or care that JS is blocked: it just keeps
-// draining whatever's left in the core's audio ring buffer, and the core
-// resumes mid-buffer once the block ends — that resync is exactly what
-// turns into the crackly/grainy burst. Lighter systems (NES, GB) have
-// small enough states that this is over before anyone notices; PSP is
-// big enough that it isn't.
-//
-// We can't make gm.loadState() itself faster or non-blocking — that's
-// inside the third-party WASM core, not something this wrapper controls
-// — but we CAN make sure nobody ever hears the resync artefact: mute
-// (using the same emu.setMuted() the visible Mute button already uses in
-// production, so this isn't a speculative new API) for the duration of
-// the operation plus a couple of settle frames afterwards, then restore
-// exactly whatever the player's own mute state was before we touched it.
-// A ~2-frame (≈30ms) silent gap is imperceptible; a burst of grain isn't.
-async function _withMutedCoreOp(fn) {
-  const emu = window.EJS_emulator;
-  const wasMutedByUser = _muted; // never force sound ON if they'd chosen to mute
-  if (emu && typeof emu.setMuted === 'function' && !wasMutedByUser) {
-    try { emu.setMuted(true); } catch(e) {}
-  }
-  // Yield one frame before the blocking call so anything the browser
-  // already had queued for the CURRENT frame (audio callback, rAF-driven
-  // core tick) finishes cleanly first, rather than getting cut off right
-  // as we block the thread — avoids stacking our hitch on top of one
-  // that was already in flight.
-  await new Promise(r => requestAnimationFrame(r));
-  try {
-    return fn();
-  } finally {
-    // A couple of frames for the core to fully resettle its internal
-    // audio/video timing before we unmute — this is the window where any
-    // leftover resync artefact would actually occur.
-    await new Promise(r => requestAnimationFrame(r));
-    await new Promise(r => requestAnimationFrame(r));
-    if (emu && typeof emu.setMuted === 'function' && !wasMutedByUser) {
-      try { emu.setMuted(false); } catch(e) {}
-    }
-  }
-}
-
 async function saveToSlot(slot) {
   if (!_ejsReady) { showToast('⚠️ Wait for the game to load'); return; }
-  if (_stateOpInProgress) { showToast('⏳ Already working on a save state'); return; }
   const gm = getGM(); if (!gm) { showToast('⚠️ Emulator not ready'); return; }
-
-  _stateOpInProgress = true;
-  renderSlots(); // grey out the row immediately — see _stateOpInProgress above
   let bytes;
-  try {
-    bytes = await _withMutedCoreOp(() => gm.getState());
-  } catch(e) {
-    _stateOpInProgress = false; renderSlots();
-    showToast('⚠️ Save failed: '+e.message); return;
-  }
+  try { bytes = gm.getState(); } catch(e) { showToast('⚠️ Save failed: '+e.message); return; }
   if (!bytes || !(bytes instanceof Uint8Array) || !bytes.length) {
-    _stateOpInProgress = false; renderSlots();
     showToast('⚠️ Could not read state'); return;
   }
   const key = ssKey(_currentGame, slot);
@@ -6404,6 +6286,7 @@ async function saveToSlot(slot) {
       data: savedToOpfs ? null : Array.from(bytes),
     });
     showToast(slot===0 ? '💾 Quick saved' : '💾 Saved to slot '+slot);
+    renderSlots();
     // ── Auto-upload save to Dropbox for premium users ──
     // Filename is the URI-encoded save-state key (not a sanitized game
     // name) so restoreSaveStatesFromCloud() can decode it back to the
@@ -6413,12 +6296,10 @@ async function saveToSlot(slot) {
       uploadSaveToDropbox(filename, bytes).catch(e => console.warn('[Dropbox] save upload failed:', e));
     }
   } catch(e) { showToast('⚠️ '+e.message); }
-  finally { _stateOpInProgress = false; renderSlots(); }
 }
 
 async function loadFromSlot(slot) {
   if (!_ejsReady) { showToast('⚠️ Wait for the game to load'); return; }
-  if (_stateOpInProgress) { showToast('⏳ Already working on a save state'); return; }
   const gm = getGM(); if (!gm) { showToast('⚠️ Emulator not ready'); return; }
   let entry;
   try { entry = await dbGet(SS_STORE, ssKey(_currentGame,slot)); } catch(e) { entry=null; }
@@ -6437,18 +6318,8 @@ async function loadFromSlot(slot) {
   if (!bytes || !bytes.length) {
     showToast('No save in '+(slot===0?'quick slot':'slot '+slot)); return;
   }
-
-  _stateOpInProgress = true;
-  renderSlots(); // grey out the row immediately — see _stateOpInProgress above
-  try {
-    await _withMutedCoreOp(() => gm.loadState(bytes));
-    showToast(slot===0?'📂 Quick loaded':'📂 Loaded slot '+slot);
-  } catch(e) {
-    showToast('⚠️ Load failed: '+e.message);
-  } finally {
-    _stateOpInProgress = false;
-    renderSlots();
-  }
+  try { gm.loadState(bytes); showToast(slot===0?'📂 Quick loaded':'📂 Loaded slot '+slot); }
+  catch(e) { showToast('⚠️ Load failed: '+e.message); }
 }
 
 async function deleteSlot(slot) {
@@ -6466,40 +6337,39 @@ async function renderSlots() {
   const el = document.getElementById('ss-slots'); if (!el) return;
   const slots = await Promise.all(Array.from({length:NUM_SLOTS},(_,i) =>
     dbGet(SS_STORE, ssKey(_currentGame,i)).catch(()=>null)));
-  const busy = _stateOpInProgress; // snapshot — see _stateOpInProgress above
 
   if (_isPremium) {
     // Premium: visual card grid with screenshot thumbnails
     const labels = ['Quick Save','Slot 1','Slot 2','Slot 3','Slot 4','Slot 5','Slot 6','Slot 7','Slot 8','Slot 9'];
-    el.innerHTML = `<div class="ss-slots-visual"${busy?' style="opacity:.5;pointer-events:none"':''}>${slots.map((s,i) => `
+    el.innerHTML = `<div class="ss-slots-visual">${slots.map((s,i) => `
       <div class="ss-slot-v">
         <div class="ss-slot-v-thumb">
           ${s && s.img ? `<img src="${s.img}" alt="Slot ${i}">` : `<span class="ss-slot-v-empty">Empty</span>`}
         </div>
         <div class="ss-slot-v-body">
           <div class="ss-slot-v-label">${labels[i]||'Slot '+i}</div>
-          <div class="ss-slot-v-time">${busy ? 'Working…' : (s ? timeAgo(s.ts) : '—')}</div>
+          <div class="ss-slot-v-time">${s ? timeAgo(s.ts) : '—'}</div>
           <div class="ss-slot-v-actions">
-            <button class="ss-slot-v-btn" onclick="saveToSlot(${i})" ${busy?'disabled':''} title="Save">💾</button>
-            <button class="ss-slot-v-btn" onclick="loadFromSlot(${i})" ${(!s||busy)?'disabled':''} title="Load">📂</button>
-            <button class="ss-slot-v-btn" onclick="deleteSlot(${i})" ${(!s||busy)?'disabled':''} title="Delete">✕</button>
+            <button class="ss-slot-v-btn" onclick="saveToSlot(${i})" title="Save">💾</button>
+            <button class="ss-slot-v-btn" onclick="loadFromSlot(${i})" ${!s?'disabled':''} title="Load">📂</button>
+            <button class="ss-slot-v-btn" onclick="deleteSlot(${i})" ${!s?'disabled':''} title="Delete">✕</button>
           </div>
         </div>
       </div>`).join('')}</div>`;
   } else {
     // Free: standard list with 3 slots
     const labels = ['Quick save','Slot 1','Slot 2'];
-    el.innerHTML = `<div${busy?' style="opacity:.5;pointer-events:none"':''}>${slots.map((s,i) => `
+    el.innerHTML = slots.map((s,i) => `
       <div class="ss-slot">
         <div class="ss-thumb">${s&&s.img?`<img src="${s.img}">`:'<span>Empty</span>'}</div>
         <div class="ss-slot-label">${labels[i]}</div>
-        <div class="ss-slot-time">${busy ? 'Working…' : (s?timeAgo(s.ts):'—')}</div>
+        <div class="ss-slot-time">${s?timeAgo(s.ts):'—'}</div>
         <div class="ss-slot-actions">
-          <button class="ss-slot-btn save-btn" onclick="saveToSlot(${i})" ${busy?'disabled':''}>💾</button>
-          <button class="ss-slot-btn load-btn" onclick="loadFromSlot(${i})" ${(!s||busy)?'disabled':''}>📂</button>
-          <button class="ss-slot-btn del-btn" onclick="deleteSlot(${i})" ${(!s||busy)?'disabled':''}>✕</button>
+          <button class="ss-slot-btn save-btn" onclick="saveToSlot(${i})">💾</button>
+          <button class="ss-slot-btn load-btn" onclick="loadFromSlot(${i})" ${!s?'disabled':''}>📂</button>
+          <button class="ss-slot-btn del-btn" onclick="deleteSlot(${i})" ${!s?'disabled':''}>✕</button>
         </div>
-      </div>`).join('')}</div>`;
+      </div>`).join('');
   }
 }
 
@@ -6514,6 +6384,7 @@ function toggleMute() {
     if (btn) btn.textContent = _muted ? '🔇 Unmute' : '🔊 Mute';
   } catch(e) {}
 }
+
 function ejsCmd(cmd) {
   const emu = window.EJS_emulator; if (!emu) return;
   try {
@@ -7057,7 +6928,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260909034500';
+const APP_VERSION = '20260909114500';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -7424,9 +7295,18 @@ async function _refreshPremiumState() {
       if (_isPremium) setTimeout(() => restoreLibraryFromCloud(), 1500);
       if (_isPremium) setTimeout(() => restoreSaveStatesFromCloud(), 2200);
     }
-    // Always push any local pref changes to cloud on login
-    // so that changes made offline sync up when connection restored
-    else {
+    // Always push any local pref changes to cloud on login so that changes
+    // made offline sync up when connection restored — but back off hard if
+    // it's been failing. Previously this fired unconditionally every 2s
+    // forever (the PREMIUM_RECHECK_MS reconcile loop calls
+    // _refreshPremiumState → this branch → savePrefsToCloud, endlessly),
+    // so a persistent server-side rejection (e.g. an RLS policy on
+    // `profiles` blocking the upsert — a 403 there is NOT something this
+    // client code can fix; check Supabase dashboard → Authentication →
+    // Policies on the profiles table) turned into an infinite retry storm
+    // hammering the DB and flooding the console with the same failure
+    // every couple of seconds for the entire session.
+    else if (Date.now() >= _cloudSaveBackoffUntil) {
       setTimeout(() => savePrefsToCloud(), 2000);
     }
   } catch(e) {
@@ -7435,6 +7315,8 @@ async function _refreshPremiumState() {
   }
 }
 let _cloudRestoreDone = false;
+let _cloudSaveFailCount = 0;
+let _cloudSaveBackoffUntil = 0;
 
 /* ══ PREMIUM RECONCILIATION ═════════════════════════════
    _isPremium is a plain JS variable, which means it can always be
@@ -7453,6 +7335,18 @@ let _cloudRestoreDone = false;
 ════════════════════════════════════════════════════════ */
 const PREMIUM_RECHECK_MS = 2000;
 function _reconcilePremium() {
+  // Skip the network round-trip entirely while a game is running — see
+  // the comment in _updatePremiumUI() above for the full reasoning
+  // (periodic main-thread work competing with a CPU-tight WASM core's
+  // timing budget every 2 seconds, for the whole length of a play
+  // session, is exactly the kind of thing that shows up as audio
+  // stutter/grain). _isPremium simply holds whatever it last was during
+  // gameplay; the very next tick after goBack() removes .game-active
+  // catches up fully, and nothing gated behind _isPremium is reachable
+  // from the player screen anyway (theme picker, premium panel, etc. all
+  // live on the library/settings screens).
+  if (document.body.classList.contains('game-active')) return;
+
   if (_currentUser && _accessToken) {
     // Signed in — ask the server what's actually true and apply it.
     _refreshPremiumState().then(_updatePremiumUI);
@@ -7505,12 +7399,34 @@ async function savePrefsToCloud() {
       username:     window._cachedUsername || null,
       savedAt:      Date.now(),
     };
-    await _supabase.from('profiles').upsert({
+    const { error } = await _supabase.from('profiles').upsert({
       id: _currentUser.id,
       user_prefs: prefs,
     }, { onConflict: 'id' });
+    if (error) throw error;
+    // Success — clear any backoff from earlier failures.
+    _cloudSaveFailCount = 0;
+    _cloudSaveBackoffUntil = 0;
   } catch(e) {
-    console.warn('[Prefs] savePrefsToCloud failed:', e);
+    _cloudSaveFailCount++;
+    // Exponential backoff, capped at 30 minutes: 10s, 40s, 2.7min, 11min,
+    // 30min, 30min, ... A persistent failure here is almost always a
+    // server-side permissions issue (RLS policy on `profiles` rejecting
+    // the upsert, expired session, etc.) — no amount of client-side
+    // retrying fixes that, so this only logs ONCE per backoff window
+    // instead of every 2 seconds forever.
+    const backoffMs = Math.min(10000 * Math.pow(4, _cloudSaveFailCount - 1), 30 * 60 * 1000);
+    _cloudSaveBackoffUntil = Date.now() + backoffMs;
+    if (_cloudSaveFailCount === 1 || _cloudSaveFailCount % 10 === 0) {
+      console.warn(
+        `[Prefs] savePrefsToCloud failed (attempt ${_cloudSaveFailCount}, ` +
+        `backing off ${Math.round(backoffMs/1000)}s). If this persists, ` +
+        `check the Supabase RLS policy on the "profiles" table — a 403 ` +
+        `here means the current session isn't permitted to upsert its own ` +
+        `row, which is a server-side config issue, not a client bug.`,
+        e
+      );
+    }
   }
 }
 
@@ -7561,6 +7477,25 @@ async function restorePrefsFromCloud() {
 }
 
 function _updatePremiumUI() {
+  // Skip all of the (cosmetic, DOM-heavy) UI reconciliation below while a
+  // game is actively running. None of it is even visible during gameplay
+  // (it only touches the signin/account panel, the themes grid, and the
+  // stats dashboard — all part of the library/settings screens, not the
+  // player screen) but it still costs real main-thread time: a full
+  // innerHTML rebuild of the themes grid (via applyTheme→renderThemesGrid)
+  // plus the stats dashboard render, running every single PREMIUM_RECHECK_MS
+  // tick (2s) for as long as the app is open — including the entire time
+  // someone is playing. On a CPU-tight WASM core like PPSSPP, competing
+  // with the emulation loop for main-thread time every 2 seconds is
+  // exactly the kind of periodic contention that shows up as audio grain/
+  // stutter, even though nothing about it is visually necessary right
+  // then. _isPremium itself is still refreshed normally by
+  // _refreshPremiumState() before this runs — only the expensive VISIBLE
+  // reconciliation is deferred, and it catches up the moment you back out
+  // to the library (goBack() removes .game-active, and the next 2s tick
+  // does the full reconciliation again).
+  if (document.body.classList.contains('game-active')) return;
+
   const loggedOut = document.getElementById('signin-logged-out');
   const loggedIn  = document.getElementById('signin-logged-in');
   const premiumActive  = document.getElementById('signin-premium-active');

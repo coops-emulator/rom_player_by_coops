@@ -54,14 +54,6 @@
     gameGear:     { label: "Game Gear",       system: "segaGG",      cores: ["genesis_plus_gx"],           extensions: ["gg"],                          bios: null, verified: true },
     masterSystem: { label: "Master System",   system: "segaMS",      cores: ["smsplus", "genesis_plus_gx"], extensions: ["sms"],                        bios: null, verified: true },
     psx:          { label: "PS1",             system: "psx",         cores: ["mednafen_psx_hw", "pcsx_rearmed"], extensions: ["cue", "chd", "pbp", "iso"], bios: { required: false, files: ["scph5501.bin", "scph5500.bin", "scph5502.bin"] }, verified: true },
-    // PSP audio note: forcing the legacy (WebGL1) core was tested as a fix
-    // for persistent audio grain during normal gameplay, but on at least
-    // one real device it caused a hard "Outdated graphics driver" boot
-    // failure instead — worse than the original problem. That's a real,
-    // reproduced regression, not a config quirk, so it's NOT forced here.
-    // See PSP_LEGACY_CORE_PREF below: it's exposed as an opt-in Settings
-    // toggle instead, so it can be tried and reverted per-device without
-    // risking every player's ability to boot PSP at all.
     psp:          { label: "PSP",             system: "psp",         cores: ["ppsspp"],                    extensions: ["iso", "cso", "pbp"],           bios: { required: false, file: "PPSSPP_BIOS.bin" }, verified: true, requiresThreads: true },
     nds:          { label: "NDS",             system: "nds",         cores: ["melonds", "desmume2015"],    extensions: ["nds"],                         bios: { required: false, files: ["bios7.bin", "bios9.bin", "firmware.bin"] }, verified: true },
     atari2600:    { label: "Atari 2600",      system: "atari2600",   cores: ["stella2014"],                extensions: ["a26", "bin"],                  bios: null, verified: true },
@@ -269,26 +261,7 @@
       window.EJS_pathtodata = this.pathToData;
       window.EJS_gameUrl = this._toUrl(rom);
       if (opts.biosUrl) window.EJS_biosUrl = this._toUrl(opts.biosUrl);
-      // Both EJS_threads and EJS_forceLegacyCores are plain shared globals
-      // (same caveat as EJS_ready/EJS_onGameStart in the boot-generation
-      // guard above) — explicitly set BOTH branches, not just the "on"
-      // case, or a previous game's flag value leaks into this boot since
-      // this app never does a full page reload between games.
-      window.EJS_threads = !!cfg.requiresThreads;
-      // opts.forceLegacyCores (NOT cfg.forceLegacyCores) — this is a
-      // per-launch opt-in the caller passes explicitly, never a blanket
-      // per-system default. See the PSP audio-grain note in CORE_REGISTRY
-      // above for why: forcing this broke PSP boot entirely on at least
-      // one real device ("Outdated graphics driver"), so it's surfaced as
-      // a Settings toggle the player can try and immediately revert,
-      // rather than something this library silently forces on everyone.
-      window.EJS_forceLegacyCores = !!opts.forceLegacyCores;
-      // Core cache is only disabled for this one launch when the caller
-      // is actively toggling forceLegacyCores — that's the one situation
-      // where a previously-cached core of the OTHER variant could trigger
-      // EmulatorJS's own "Outdated Core" mismatch guard. Normal launches
-      // keep caching on for fast subsequent boots.
-      window.EJS_cacheConfig = { enabled: !opts.forceLegacyCores };
+      if (cfg.requiresThreads) window.EJS_threads = true;
 
       const gameName = opts.gameName || this._deriveGameName(rom);
       if (gameName) {
