@@ -2906,7 +2906,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260908183000"></script>
+<script src="emulator-backbone.js?v=20260908201500"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6260,12 +6260,84 @@ async function captureScreenshot() {
 
 function ssKey(game, slot) { return 'ss::' + game + '::' + slot; }
 
+// Set while a save-state save/load is actually touching the core (i.e.
+// between the moment we start and the moment gm.getState()/gm.loadState()
+// has fully returned and the core's had a couple of frames to resettle).
+// Two jobs:
+//  1) Blocks re-entrancy — gm.getState()/gm.loadState() are fully
+//     SYNCHRONOUS calls. A rapid double-tap on a slot button (or tapping
+//     a second slot while the first is still resolving its async
+//     OPFS/IDB read) could otherwise fire a second heavy call while the
+//     core is mid-resync from the first, which would only compound the
+//     exact hitch this fix is trying to remove.
+//  2) Lets renderSlots() grey out every slot button while true, so the
+//     brief stall reads as "the app is doing something" instead of "the
+//     app just glitched" — a save/load doesn't get materially faster,
+//     but it stops feeling broken.
+let _stateOpInProgress = false;
+
+// Root cause of the "gameplay felt delayed and audio went grainy after
+// loading a save state" reports (most visible on PSP, where states run
+// into the tens of megabytes): gm.getState()/gm.loadState() are fully
+// SYNCHRONOUS — on a big, data-heavy state they block the main thread for
+// a real stretch while the core serialises/deserialises. The audio
+// hardware doesn't know or care that JS is blocked: it just keeps
+// draining whatever's left in the core's audio ring buffer, and the core
+// resumes mid-buffer once the block ends — that resync is exactly what
+// turns into the crackly/grainy burst. Lighter systems (NES, GB) have
+// small enough states that this is over before anyone notices; PSP is
+// big enough that it isn't.
+//
+// We can't make gm.loadState() itself faster or non-blocking — that's
+// inside the third-party WASM core, not something this wrapper controls
+// — but we CAN make sure nobody ever hears the resync artefact: mute
+// (using the same emu.setMuted() the visible Mute button already uses in
+// production, so this isn't a speculative new API) for the duration of
+// the operation plus a couple of settle frames afterwards, then restore
+// exactly whatever the player's own mute state was before we touched it.
+// A ~2-frame (≈30ms) silent gap is imperceptible; a burst of grain isn't.
+async function _withMutedCoreOp(fn) {
+  const emu = window.EJS_emulator;
+  const wasMutedByUser = _muted; // never force sound ON if they'd chosen to mute
+  if (emu && typeof emu.setMuted === 'function' && !wasMutedByUser) {
+    try { emu.setMuted(true); } catch(e) {}
+  }
+  // Yield one frame before the blocking call so anything the browser
+  // already had queued for the CURRENT frame (audio callback, rAF-driven
+  // core tick) finishes cleanly first, rather than getting cut off right
+  // as we block the thread — avoids stacking our hitch on top of one
+  // that was already in flight.
+  await new Promise(r => requestAnimationFrame(r));
+  try {
+    return fn();
+  } finally {
+    // A couple of frames for the core to fully resettle its internal
+    // audio/video timing before we unmute — this is the window where any
+    // leftover resync artefact would actually occur.
+    await new Promise(r => requestAnimationFrame(r));
+    await new Promise(r => requestAnimationFrame(r));
+    if (emu && typeof emu.setMuted === 'function' && !wasMutedByUser) {
+      try { emu.setMuted(false); } catch(e) {}
+    }
+  }
+}
+
 async function saveToSlot(slot) {
   if (!_ejsReady) { showToast('⚠️ Wait for the game to load'); return; }
+  if (_stateOpInProgress) { showToast('⏳ Already working on a save state'); return; }
   const gm = getGM(); if (!gm) { showToast('⚠️ Emulator not ready'); return; }
+
+  _stateOpInProgress = true;
+  renderSlots(); // grey out the row immediately — see _stateOpInProgress above
   let bytes;
-  try { bytes = gm.getState(); } catch(e) { showToast('⚠️ Save failed: '+e.message); return; }
+  try {
+    bytes = await _withMutedCoreOp(() => gm.getState());
+  } catch(e) {
+    _stateOpInProgress = false; renderSlots();
+    showToast('⚠️ Save failed: '+e.message); return;
+  }
   if (!bytes || !(bytes instanceof Uint8Array) || !bytes.length) {
+    _stateOpInProgress = false; renderSlots();
     showToast('⚠️ Could not read state'); return;
   }
   const key = ssKey(_currentGame, slot);
@@ -6286,7 +6358,6 @@ async function saveToSlot(slot) {
       data: savedToOpfs ? null : Array.from(bytes),
     });
     showToast(slot===0 ? '💾 Quick saved' : '💾 Saved to slot '+slot);
-    renderSlots();
     // ── Auto-upload save to Dropbox for premium users ──
     // Filename is the URI-encoded save-state key (not a sanitized game
     // name) so restoreSaveStatesFromCloud() can decode it back to the
@@ -6296,10 +6367,12 @@ async function saveToSlot(slot) {
       uploadSaveToDropbox(filename, bytes).catch(e => console.warn('[Dropbox] save upload failed:', e));
     }
   } catch(e) { showToast('⚠️ '+e.message); }
+  finally { _stateOpInProgress = false; renderSlots(); }
 }
 
 async function loadFromSlot(slot) {
   if (!_ejsReady) { showToast('⚠️ Wait for the game to load'); return; }
+  if (_stateOpInProgress) { showToast('⏳ Already working on a save state'); return; }
   const gm = getGM(); if (!gm) { showToast('⚠️ Emulator not ready'); return; }
   let entry;
   try { entry = await dbGet(SS_STORE, ssKey(_currentGame,slot)); } catch(e) { entry=null; }
@@ -6318,8 +6391,18 @@ async function loadFromSlot(slot) {
   if (!bytes || !bytes.length) {
     showToast('No save in '+(slot===0?'quick slot':'slot '+slot)); return;
   }
-  try { gm.loadState(bytes); showToast(slot===0?'📂 Quick loaded':'📂 Loaded slot '+slot); }
-  catch(e) { showToast('⚠️ Load failed: '+e.message); }
+
+  _stateOpInProgress = true;
+  renderSlots(); // grey out the row immediately — see _stateOpInProgress above
+  try {
+    await _withMutedCoreOp(() => gm.loadState(bytes));
+    showToast(slot===0?'📂 Quick loaded':'📂 Loaded slot '+slot);
+  } catch(e) {
+    showToast('⚠️ Load failed: '+e.message);
+  } finally {
+    _stateOpInProgress = false;
+    renderSlots();
+  }
 }
 
 async function deleteSlot(slot) {
@@ -6337,39 +6420,40 @@ async function renderSlots() {
   const el = document.getElementById('ss-slots'); if (!el) return;
   const slots = await Promise.all(Array.from({length:NUM_SLOTS},(_,i) =>
     dbGet(SS_STORE, ssKey(_currentGame,i)).catch(()=>null)));
+  const busy = _stateOpInProgress; // snapshot — see _stateOpInProgress above
 
   if (_isPremium) {
     // Premium: visual card grid with screenshot thumbnails
     const labels = ['Quick Save','Slot 1','Slot 2','Slot 3','Slot 4','Slot 5','Slot 6','Slot 7','Slot 8','Slot 9'];
-    el.innerHTML = `<div class="ss-slots-visual">${slots.map((s,i) => `
+    el.innerHTML = `<div class="ss-slots-visual"${busy?' style="opacity:.5;pointer-events:none"':''}>${slots.map((s,i) => `
       <div class="ss-slot-v">
         <div class="ss-slot-v-thumb">
           ${s && s.img ? `<img src="${s.img}" alt="Slot ${i}">` : `<span class="ss-slot-v-empty">Empty</span>`}
         </div>
         <div class="ss-slot-v-body">
           <div class="ss-slot-v-label">${labels[i]||'Slot '+i}</div>
-          <div class="ss-slot-v-time">${s ? timeAgo(s.ts) : '—'}</div>
+          <div class="ss-slot-v-time">${busy ? 'Working…' : (s ? timeAgo(s.ts) : '—')}</div>
           <div class="ss-slot-v-actions">
-            <button class="ss-slot-v-btn" onclick="saveToSlot(${i})" title="Save">💾</button>
-            <button class="ss-slot-v-btn" onclick="loadFromSlot(${i})" ${!s?'disabled':''} title="Load">📂</button>
-            <button class="ss-slot-v-btn" onclick="deleteSlot(${i})" ${!s?'disabled':''} title="Delete">✕</button>
+            <button class="ss-slot-v-btn" onclick="saveToSlot(${i})" ${busy?'disabled':''} title="Save">💾</button>
+            <button class="ss-slot-v-btn" onclick="loadFromSlot(${i})" ${(!s||busy)?'disabled':''} title="Load">📂</button>
+            <button class="ss-slot-v-btn" onclick="deleteSlot(${i})" ${(!s||busy)?'disabled':''} title="Delete">✕</button>
           </div>
         </div>
       </div>`).join('')}</div>`;
   } else {
     // Free: standard list with 3 slots
     const labels = ['Quick save','Slot 1','Slot 2'];
-    el.innerHTML = slots.map((s,i) => `
+    el.innerHTML = `<div${busy?' style="opacity:.5;pointer-events:none"':''}>${slots.map((s,i) => `
       <div class="ss-slot">
         <div class="ss-thumb">${s&&s.img?`<img src="${s.img}">`:'<span>Empty</span>'}</div>
         <div class="ss-slot-label">${labels[i]}</div>
-        <div class="ss-slot-time">${s?timeAgo(s.ts):'—'}</div>
+        <div class="ss-slot-time">${busy ? 'Working…' : (s?timeAgo(s.ts):'—')}</div>
         <div class="ss-slot-actions">
-          <button class="ss-slot-btn save-btn" onclick="saveToSlot(${i})">💾</button>
-          <button class="ss-slot-btn load-btn" onclick="loadFromSlot(${i})" ${!s?'disabled':''}>📂</button>
-          <button class="ss-slot-btn del-btn" onclick="deleteSlot(${i})" ${!s?'disabled':''}>✕</button>
+          <button class="ss-slot-btn save-btn" onclick="saveToSlot(${i})" ${busy?'disabled':''}>💾</button>
+          <button class="ss-slot-btn load-btn" onclick="loadFromSlot(${i})" ${(!s||busy)?'disabled':''}>📂</button>
+          <button class="ss-slot-btn del-btn" onclick="deleteSlot(${i})" ${(!s||busy)?'disabled':''}>✕</button>
         </div>
-      </div>`).join('');
+      </div>`).join('')}</div>`;
   }
 }
 
@@ -6384,7 +6468,6 @@ function toggleMute() {
     if (btn) btn.textContent = _muted ? '🔇 Unmute' : '🔊 Mute';
   } catch(e) {}
 }
-
 function ejsCmd(cmd) {
   const emu = window.EJS_emulator; if (!emu) return;
   try {
@@ -6928,7 +7011,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260908183000';
+const APP_VERSION = '20260908201500';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
