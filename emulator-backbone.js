@@ -54,7 +54,23 @@
     gameGear:     { label: "Game Gear",       system: "segaGG",      cores: ["genesis_plus_gx"],           extensions: ["gg"],                          bios: null, verified: true },
     masterSystem: { label: "Master System",   system: "segaMS",      cores: ["smsplus", "genesis_plus_gx"], extensions: ["sms"],                        bios: null, verified: true },
     psx:          { label: "PS1",             system: "psx",         cores: ["mednafen_psx_hw", "pcsx_rearmed"], extensions: ["cue", "chd", "pbp", "iso"], bios: { required: false, files: ["scph5501.bin", "scph5500.bin", "scph5502.bin"] }, verified: true },
-    psp:          { label: "PSP",             system: "psp",         cores: ["ppsspp"],                    extensions: ["iso", "cso", "pbp"],           bios: { required: false, file: "PPSSPP_BIOS.bin" }, verified: true, requiresThreads: true },
+    // PSP: forceLegacyCores is a deliberate, user-confirmed audio fix, not a
+    // guess. EJS_forceLegacyCores forces EmulatorJS's separate WebGL1 core
+    // build instead of the default WebGL2 one — that's a genuinely different
+    // compiled WASM artifact, not just a rendering-path flag, and it turned
+    // out to bundle a different/older audio backend than the default
+    // (non-legacy) ppsspp build. Confirmed by direct A/B test (2026-09-08):
+    // default build → persistent audio grain/static during ordinary
+    // gameplay with video completely smooth (isolates the bug to the audio
+    // backend specifically, not general performance); same ROM, same
+    // device, EJS_forceLegacyCores=true → clean audio, no other regression
+    // noticed. Matches a known upstream EmulatorJS issue (audio static in
+    // Chrome/Safari's WebAudio bridge, EmulatorJS/EmulatorJS#739) that the
+    // legacy build apparently isn't affected by. Combines fine with
+    // requiresThreads above — both flags were active together in the
+    // confirmed-working test, so this app doesn't have to choose one or
+    // the other for PSP.
+    psp:          { label: "PSP",             system: "psp",         cores: ["ppsspp"],                    extensions: ["iso", "cso", "pbp"],           bios: { required: false, file: "PPSSPP_BIOS.bin" }, verified: true, requiresThreads: true, forceLegacyCores: true },
     nds:          { label: "NDS",             system: "nds",         cores: ["melonds", "desmume2015"],    extensions: ["nds"],                         bios: { required: false, files: ["bios7.bin", "bios9.bin", "firmware.bin"] }, verified: true },
     atari2600:    { label: "Atari 2600",      system: "atari2600",   cores: ["stella2014"],                extensions: ["a26", "bin"],                  bios: null, verified: true },
     atari7800:    { label: "Atari 7800",      system: "atari7800",   cores: ["prosystem"],                 extensions: ["a78", "bin"],                  bios: null, verified: true },
@@ -261,7 +277,13 @@
       window.EJS_pathtodata = this.pathToData;
       window.EJS_gameUrl = this._toUrl(rom);
       if (opts.biosUrl) window.EJS_biosUrl = this._toUrl(opts.biosUrl);
-      if (cfg.requiresThreads) window.EJS_threads = true;
+      // Both EJS_threads and EJS_forceLegacyCores are plain shared globals
+      // (same caveat as EJS_ready/EJS_onGameStart in the boot-generation
+      // guard above) — explicitly set BOTH branches, not just the "on"
+      // case, or a previous game's flag value leaks into this boot since
+      // this app never does a full page reload between games.
+      window.EJS_threads = !!cfg.requiresThreads;
+      window.EJS_forceLegacyCores = !!cfg.forceLegacyCores;
 
       const gameName = opts.gameName || this._deriveGameName(rom);
       if (gameName) {
