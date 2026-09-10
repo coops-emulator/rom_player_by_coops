@@ -54,7 +54,24 @@
     gameGear:     { label: "Game Gear",       system: "segaGG",      cores: ["genesis_plus_gx"],           extensions: ["gg"],                          bios: null, verified: true },
     masterSystem: { label: "Master System",   system: "segaMS",      cores: ["smsplus", "genesis_plus_gx"], extensions: ["sms"],                        bios: null, verified: true },
     psx:          { label: "PS1",             system: "psx",         cores: ["mednafen_psx_hw", "pcsx_rearmed"], extensions: ["cue", "chd", "pbp", "iso"], bios: { required: false, files: ["scph5501.bin", "scph5500.bin", "scph5502.bin"] }, verified: true },
-    psp:          { label: "PSP",             system: "psp",         cores: ["ppsspp"],                    extensions: ["iso", "cso", "pbp"],           bios: { required: false, file: "PPSSPP_BIOS.bin" }, verified: true, requiresThreads: true },
+    // PSP CPU core default: PPSSPP's own upstream source
+    // (hrydgard/ppsspp, libretro/libretro.cpp) defaults g_Config.iCpuCore
+    // to CPUCore::INTERPRETER specifically "to allow startup in platforms
+    // w/o JIT capability" — a safe-but-slow fallback, not the fast path.
+    // User-confirmed fix (2026-09-09): switching PSP's in-player CPU Core
+    // setting from the default IR JIT to plain JIT resolved persistent
+    // audio grain during normal gameplay entirely on their device — this
+    // was a genuine CPU-headroom shortfall, not (only) the browser-side
+    // WebAudio bug. ppsspp_cpu_core is the standard libretro-style core
+    // variable name (same naming convention as this app's own
+    // rewind_enable/rewind_buffer_size options below); setting it via
+    // EJS_defaultOptions only changes the STARTING default and never
+    // overrides a value a player already saved for themselves locally.
+    // If a fresh PSP launch's in-player Settings doesn't show "JIT"
+    // pre-selected after this ships, the exact key name needs
+    // reconfirming via EJS_DEBUG_XX's "supported menu options" console
+    // log — flagging that now so it's not mistaken for a silent success.
+    psp:          { label: "PSP",             system: "psp",         cores: ["ppsspp"],                    extensions: ["iso", "cso", "pbp"],           bios: { required: false, file: "PPSSPP_BIOS.bin" }, verified: true, requiresThreads: true, coreOptions: { ppsspp_cpu_core: "JIT" } },
     nds:          { label: "NDS",             system: "nds",         cores: ["melonds", "desmume2015"],    extensions: ["nds"],                         bios: { required: false, files: ["bios7.bin", "bios9.bin", "firmware.bin"] }, verified: true },
     atari2600:    { label: "Atari 2600",      system: "atari2600",   cores: ["stella2014"],                extensions: ["a26", "bin"],                  bios: null, verified: true },
     atari7800:    { label: "Atari 7800",      system: "atari7800",   cores: ["prosystem"],                 extensions: ["a78", "bin"],                  bios: null, verified: true },
@@ -273,6 +290,26 @@
 
       if (opts.color) window.EJS_color = opts.color;
       if (opts.backgroundColor) window.EJS_backgroundColor = opts.backgroundColor;
+
+      // Reset to a clean slate for THIS boot before anything below adds to
+      // it. window.EJS_defaultOptions is a plain shared global (same
+      // caveat as EJS_threads/EJS_forceLegacyCores above) that every path
+      // below only ever merges INTO via Object.assign — with nothing ever
+      // clearing it first, a previous game's options (rewind settings,
+      // core-specific tuning) could silently leak into this one's boot
+      // since this app never does a full page reload between games.
+      window.EJS_defaultOptions = {};
+
+      // Per-system core option defaults (see CORE_REGISTRY, e.g. psp's
+      // ppsspp_cpu_core) — same libretro-style variable mechanism as the
+      // rewind options below, just per-system rather than universal.
+      // Applied as a DEFAULT: EmulatorJS only uses this as the starting
+      // value when the player hasn't already saved their own override for
+      // this option in their browser, so anyone who's manually tuned this
+      // themselves keeps their own choice.
+      if (cfg.coreOptions) {
+        window.EJS_defaultOptions = Object.assign(window.EJS_defaultOptions, cfg.coreOptions);
+      }
 
       if (opts.rewind !== false) {
         const profile =
