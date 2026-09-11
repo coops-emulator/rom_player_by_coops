@@ -2906,7 +2906,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260910200000"></script>
+<script src="emulator-backbone.js?v=20260911083000"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6928,7 +6928,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260910200000';
+const APP_VERSION = '20260911083000';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -7306,7 +7306,7 @@ async function _refreshPremiumState() {
     // Policies on the profiles table) turned into an infinite retry storm
     // hammering the DB and flooding the console with the same failure
     // every couple of seconds for the entire session.
-    else if (Date.now() >= _cloudSaveBackoffUntil) {
+    else if (_prefsDirty && Date.now() >= _cloudSaveBackoffUntil) {
       setTimeout(() => savePrefsToCloud(), 2000);
     }
   } catch(e) {
@@ -7317,6 +7317,18 @@ async function _refreshPremiumState() {
 let _cloudRestoreDone = false;
 let _cloudSaveFailCount = 0;
 let _cloudSaveBackoffUntil = 0;
+// True only when a pref change has happened that hasn't been CONFIRMED
+// saved yet (set true on a failed savePrefsToCloud(), cleared on success).
+// The 5 real change-triggered call sites (theme apply x2, custom theme
+// save, sort change, username save) always call savePrefsToCloud()
+// directly and immediately regardless of this flag — it exists purely to
+// gate the PERIODIC reconcile-loop retry below, so that loop stops
+// resending an already-synced, completely unchanged payload every ~2
+// seconds forever. That was real, confirmed traffic in production (every
+// check-premium tick was pairing with a profiles upsert even while
+// completely idle on the library screen, succeeding every time — wasted
+// load on Supabase and noisy devtools, not a failure, just needless).
+let _prefsDirty = false;
 
 /* ══ PREMIUM RECONCILIATION ═════════════════════════════
    _isPremium is a plain JS variable, which means it can always be
@@ -7404,11 +7416,18 @@ async function savePrefsToCloud() {
       user_prefs: prefs,
     }, { onConflict: 'id' });
     if (error) throw error;
-    // Success — clear any backoff from earlier failures.
+    // Success — clear any backoff from earlier failures, and mark clean:
+    // there's nothing left for the periodic reconcile loop to retry.
     _cloudSaveFailCount = 0;
     _cloudSaveBackoffUntil = 0;
+    _prefsDirty = false;
   } catch(e) {
     _cloudSaveFailCount++;
+    // Mark dirty so the periodic reconcile loop knows there's a real,
+    // unsynced change to retry — see _prefsDirty's own declaration for
+    // why this gate exists at all (stops that loop resending an already-
+    // synced, unchanged payload forever).
+    _prefsDirty = true;
     // Exponential backoff, capped at 30 minutes: 10s, 40s, 2.7min, 11min,
     // 30min, 30min, ... A persistent failure here is almost always a
     // server-side permissions issue (RLS policy on `profiles` rejecting
