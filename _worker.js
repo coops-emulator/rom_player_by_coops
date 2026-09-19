@@ -64,7 +64,81 @@ async function verifyUser(request) {
 }
 
 // ══════════════════════════════════════════════════════
-// Minimal best-effort rate limiting.
+// Offline premium entitlement — signed, expiring, unforgeable.
+//
+// Why this exists: the app needs to let a previously-verified premium
+// user keep their premium features while genuinely offline (no network
+// to re-check /check-premium). The naive way to do that — just keep
+// whatever _isPremium was last set to in the client's memory — is
+// trivially exploitable: anyone can open DevTools and type
+// `_isPremium = true`, online or offline, and there'd be nothing to
+// catch it while offline (the existing 2-second reconciliation loop is
+// the only thing that stomps a tampered value back to the truth, and
+// that loop can't run without a network round-trip).
+//
+// The fix is an asymmetric signature, not a bigger secret to hide.
+// Every successful /check-premium response includes a signed
+// attestation of "this uid was premium as of this timestamp, valid
+// until this expiry" — signed with a PRIVATE key that only exists here,
+// server-side, as the OFFLINE_ENTITLEMENT_PRIVATE_KEY_JWK secret. The
+// client only ever holds the matching PUBLIC key (embedded directly in
+// index.html — safe to expose, since a public key can verify a
+// signature but can never be used to create a new one). This makes it
+// cryptographically infeasible to mint a fake token from the browser
+// console: you can only ever replay an attestation this server actually
+// issued while the user was genuinely verified premium, and you can't
+// alter a single byte of it (flip isPremium, extend expiresAt, swap in
+// a different uid) without invalidating the signature. A short expiry
+// (see OFFLINE_GRACE_MS below) bounds the damage of a stolen/replayed
+// token to a limited window, and naturally lets a cancelled
+// subscription lapse offline too, once the last-issued token expires.
+//
+// The signed payload is a fixed-order pipe-delimited string, NOT
+// JSON.stringify(payload) — JSON key order isn't guaranteed identical
+// between this Workers runtime and every browser engine the client
+// might run in, and ECDSA signs raw bytes with zero tolerance for a
+// single differing byte. A fixed string format sidesteps that risk
+// entirely; both sides build the exact same string from the same
+// fields in the same order, unconditionally.
+// ══════════════════════════════════════════════════════
+const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function _offlineEntitlementCanonicalString(payload) {
+  return `${payload.uid}|${payload.isPremium}|${payload.issuedAt}|${payload.expiresAt}`;
+}
+
+function _b64url(bytes) {
+  let bin = '';
+  for (const b of new Uint8Array(bytes)) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function signOfflineEntitlement(env, uid, isPremium) {
+  if (!env.OFFLINE_ENTITLEMENT_PRIVATE_KEY_JWK) {
+    // Secret not configured yet — degrade gracefully. /check-premium
+    // still works and returns the real is_premium value; the client
+    // just won't get an offline grace token until this is set up
+    // (wrangler secret put OFFLINE_ENTITLEMENT_PRIVATE_KEY_JWK).
+    console.warn('[offline-entitlement] OFFLINE_ENTITLEMENT_PRIVATE_KEY_JWK not set — skipping');
+    return null;
+  }
+  try {
+    const jwk = JSON.parse(env.OFFLINE_ENTITLEMENT_PRIVATE_KEY_JWK);
+    const key = await crypto.subtle.importKey(
+      'jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']
+    );
+    const now = Date.now();
+    const payload = { uid, isPremium: !!isPremium, issuedAt: now, expiresAt: now + OFFLINE_GRACE_MS };
+    const data = new TextEncoder().encode(_offlineEntitlementCanonicalString(payload));
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, data);
+    return { payload, signature: _b64url(sig) };
+  } catch (e) {
+    console.error('[offline-entitlement] signing failed:', e);
+    return null;
+  }
+}
+
+
 // Real protection should also come from a Cloudflare Rate Limiting
 // rule on /redeem-code and /check-premium in the dashboard — that
 // enforces at the edge across all isolates. This KV-backed check is
@@ -238,10 +312,13 @@ async function handleCheckPremium(request, env, CORS) {
       headers: { ...sb, 'Prefer': 'return=minimal' },
       body: JSON.stringify({ id: userId, is_premium: false }),
     });
-    return json({ is_premium: false }, 200, CORS);
+    const offlineEntitlement = await signOfflineEntitlement(env, userId, false);
+    return json({ is_premium: false, offlineEntitlement }, 200, CORS);
   }
 
-  return json({ is_premium: rows[0].is_premium || false }, 200, CORS);
+  const isPremium = rows[0].is_premium || false;
+  const offlineEntitlement = await signOfflineEntitlement(env, userId, isPremium);
+  return json({ is_premium: isPremium, offlineEntitlement }, 200, CORS);
 }
 
 // ══════════════════════════════════════════════════════

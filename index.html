@@ -2906,7 +2906,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260911083000"></script>
+<script src="emulator-backbone.js?v=20260916150000"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -3703,28 +3703,31 @@ function showHomeTab(btn, id) {
     const el = document.getElementById(t);
     if (el) el.style.display = 'none';
   });
-  btn.classList.add('on');
+  if (btn) btn.classList.add('on'); // Settings has no .on-highlighted header button — openSettings() below calls this with btn=null
   document.getElementById(id).style.display = 'block';
   if (id === 'tab-load')    renderRecentlyPlayed();
   if (id === 'tab-lib')     renderLibrary();
   if (id === 'tab-signin')  _updatePremiumUI();
-  if (id === 'tab-settings') { renderThemesGrid(); renderSizeOptions(); renderBiosStatus(); }
+  if (id === 'tab-settings') {
+    renderThemesGrid(); renderSizeOptions(); renderBiosStatus();
+    const unameInput = document.getElementById('username-input');
+    if (unameInput) unameInput.value = getUsername();
+    checkStorageUsage();
+  }
   if (id === 'tab-signin' && _isPremium) setTimeout(() => renderStatsDashboard(), 100);
 }
 
+// Settings has no dedicated header tab button to highlight (unlike Play/
+// Library/Linkup Room/Sign In), so this is a thin wrapper around
+// showHomeTab() rather than its own parallel implementation. It used to
+// be a separate function with its own, incomplete hide-list (only
+// tab-load/tab-lib/tab-rx — never tab-signin), so opening Settings while
+// on the Sign In tab left tab-signin still visible and painting over
+// tab-settings underneath it: Settings "opened" but you couldn't see it.
+// Reusing showHomeTab()'s single, complete hide-everything list fixes
+// that at the root instead of patching the duplicate list a second time.
 function openSettings() {
-  // Hide all tab content, clear tab highlights, show settings panel
-  document.querySelectorAll('.htab').forEach(t => t.classList.remove('on'));
-  ['tab-load','tab-lib','tab-rx'].forEach(t => {
-    const el = document.getElementById(t);
-    if (el) el.style.display = 'none';
-  });
-  document.getElementById('tab-settings').style.display = 'block';
-  renderThemesGrid();
-  renderSizeOptions();
-  const unameInput = document.getElementById('username-input');
-  if (unameInput) unameInput.value = getUsername();
-  checkStorageUsage();
+  showHomeTab(null, 'tab-settings');
 }
 
 /* ══ STORAGE — OPFS + IndexedDB v4 ═══════════════════
@@ -4294,8 +4297,7 @@ async function libAdd(name, sysLabel, core, file) {
     hasRom: !!file || existing?.hasRom || false,
     addedAt: existing?.addedAt || Date.now(),
     romInOpfs: existing?.romInOpfs || false,
-  });
-  if (file) {
+  });  if (file) {
     const buf = await file.arrayBuffer();
     const ext = file.name.split('.').pop().toLowerCase();
     // OPFS gives truly unlimited storage, never evicted by the browser.
@@ -4322,6 +4324,33 @@ async function libAdd(name, sysLabel, core, file) {
       await dbPut(META_STORE, meta);
     }
   }
+}
+
+// "Recently played" / library "Recent" sort were showing the last game
+// UPLOADED, not the last game actually PLAYED — because launch() only
+// ever touched lastPlayed via libAdd(), and libAdd() was only called
+// when a fresh `file` was passed in. Replaying an existing library game
+// goes through libPlayFromDB() → launch(url, sys, name, false) — file is
+// explicitly `false` there, so lastPlayed was never updated on ordinary
+// replay at all, only on the rare "drag a new file straight into the
+// player" case.
+//
+// The fix is NOT "just call libAdd() unconditionally" — libAdd() does a
+// full dbPut() object replacement whose written fields don't include
+// opfsFilename or romPointer at all (see its own body above). Calling it
+// on every replay would silently wipe the very fields libPlayFromDB()
+// needs to find the ROM next time (local OPFS file, or a Dropbox
+// pointer), breaking future relaunches while "fixing" the sort order.
+// This does a plain read-modify-write of the EXISTING record instead,
+// touching only lastPlayed/playCount and leaving every other field —
+// including opfsFilename/romPointer/hasRom/favourite/etc. — untouched.
+async function touchPlayStats(name, core) {
+  const id = makeId(name, core);
+  const existing = await dbGet(META_STORE, id).catch(() => null);
+  if (!existing) return; // shouldn't happen (we're launching a game that's already in the library), but a safe no-op if it ever does
+  existing.lastPlayed = Date.now();
+  existing.playCount = (existing.playCount || 0) + 1;
+  await dbPut(META_STORE, existing);
 }
 
 async function libRemove(name, core) {
@@ -5950,6 +5979,7 @@ async function launch(romUrl, sys, name, file) {
     const badge = document.getElementById('sbadge');
     badge.textContent = sys.label; badge.style.background = sys.bg; badge.style.color = sys.fg;
     if (file) libAdd(name, sys.label, sys.core, file);
+    else touchPlayStats(name, sys.core); // replaying an existing library game — see touchPlayStats()'s own comment for why this can't just call libAdd()
     _currentGame = sys.core + '::' + name;
     renderSlots(); renderKeys(sys.core); cleanup();
 
@@ -6928,7 +6958,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260911083000';
+const APP_VERSION = '20260916150000';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -7234,6 +7264,80 @@ let _authMode = 'signup';
 // just trust a userId value we hand it from the client.
 let _accessToken = null;
 
+/* ══ OFFLINE PREMIUM ENTITLEMENT ═══════════════════════
+   Lets a genuinely-premium user keep premium features while offline (no
+   network to re-check /check-premium), WITHOUT that becoming a
+   "type _isPremium = true in the console" exploit.
+
+   How it's safe: every successful /check-premium response includes a
+   signed attestation ("this uid was premium as of this timestamp, valid
+   until this expiry"), signed server-side with a private key this
+   client never has. This constant is the matching PUBLIC key — safe to
+   embed, since a public key can verify a signature but can never be
+   used to mint a new one. Verified via Web Crypto (crypto.subtle), not
+   trusted blindly: see verifyOfflineEntitlement() below. Someone can
+   still flip window._isPremium in DevTools, but that alone unlocks
+   nothing while offline — _refreshPremiumState()'s offline branch reads
+   the SIGNED, VERIFIED value, never the bare variable, to decide
+   offline access. See _worker.js's signOfflineEntitlement() for the
+   signing side and the full threat-model writeup.
+═══════════════════════════════════════════════════ */
+const OFFLINE_ENTITLEMENT_PUBLIC_JWK = {
+  kty: "EC", crv: "P-256",
+  x: "jczXJONg2SIoNDCPoCPuYSdf40j5fRLSWZwTcu_DNPQ",
+  y: "xJvti_-A6B7pMK6x2RZeAwmWlkQs8nREF4m_O1y7h54",
+};
+let _offlineEntitlementKeyPromise = null;
+function _getOfflineEntitlementKey() {
+  if (!_offlineEntitlementKeyPromise) {
+    _offlineEntitlementKeyPromise = crypto.subtle.importKey(
+      'jwk', OFFLINE_ENTITLEMENT_PUBLIC_JWK,
+      { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']
+    );
+  }
+  return _offlineEntitlementKeyPromise;
+}
+
+function _offlineEntitlementCanonicalString(payload) {
+  // MUST exactly match _worker.js's signOfflineEntitlement() — a fixed,
+  // pipe-delimited field order rather than JSON.stringify(), since JSON
+  // key order isn't guaranteed identical between the Workers runtime
+  // and every browser engine, and ECDSA tolerates zero byte difference.
+  return `${payload.uid}|${payload.isPremium}|${payload.issuedAt}|${payload.expiresAt}`;
+}
+
+function _b64urlToBytes(b64url) {
+  const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
+  const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// Verifies a stored { payload, signature } blob against the public key,
+// AND that it actually belongs to the currently signed-in user, AND
+// that it hasn't expired. Returns the verified boolean isPremium value,
+// or null if the blob is missing/invalid/expired/wrong-user/tampered —
+// null always means "no offline grace," never a guess.
+async function verifyOfflineEntitlement(entitlement, expectedUid) {
+  if (!entitlement || !entitlement.payload || !entitlement.signature) return null;
+  const { payload, signature } = entitlement;
+  if (payload.uid !== expectedUid) return null; // never honor another account's cached grant
+  if (typeof payload.expiresAt !== 'number' || Date.now() > payload.expiresAt) return null;
+  try {
+    const key = await _getOfflineEntitlementKey();
+    const data = new TextEncoder().encode(_offlineEntitlementCanonicalString(payload));
+    const sigBytes = _b64urlToBytes(signature);
+    const valid = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, sigBytes, data);
+    return valid ? !!payload.isPremium : null;
+  } catch (e) {
+    console.warn('[offline-entitlement] verification failed:', e);
+    return null;
+  }
+}
+
+
 function initSupabase() {
   try {
     _supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
@@ -7266,8 +7370,11 @@ function initSupabase() {
   }
 }
 
+let _offlineGraceActive = false; // true only while _isPremium is currently sourced
+                                  // from a verified cached entitlement, not a live check
+
 async function _refreshPremiumState() {
-  if (!_currentUser || !_accessToken) { _isPremium = false; return; }
+  if (!_currentUser || !_accessToken) { _isPremium = false; _offlineGraceActive = false; return; }
   try {
     // Worker verifies _accessToken itself against Supabase Auth and
     // derives the user id from THAT — it ignores any userId we might
@@ -7284,8 +7391,20 @@ async function _refreshPremiumState() {
     if (r.ok) {
       const data = await r.json();
       _isPremium = data.is_premium || false;
+      _offlineGraceActive = false; // a real server answer always wins over any cached grant
+      // Cache the freshly-issued signed entitlement for the next time
+      // we're offline. See its own declaration above for why this is
+      // safe (asymmetric signature, verified on every use, never
+      // trusted blindly) — this is just storing the server's own
+      // signed statement for later, not granting anything ourselves.
+      if (data.offlineEntitlement) {
+        prefSet('rp-offline-entitlement', data.offlineEntitlement).catch(() => {});
+      }
     } else {
+      // A real server response saying no (e.g. 401) — NOT a connectivity
+      // problem, so no offline grace here. This is a genuine denial.
       _isPremium = false;
+      _offlineGraceActive = false;
     }
     console.log('[Auth] is_premium:', _isPremium);
     // Trigger cloud restore on first sign-in for the session
@@ -7310,8 +7429,35 @@ async function _refreshPremiumState() {
       setTimeout(() => savePrefsToCloud(), 2000);
     }
   } catch(e) {
-    console.warn('[Auth] _refreshPremiumState exception:', e);
-    _isPremium = false;
+    // Network-level failure — this is the actual "we're offline" case
+    // (as opposed to the `else` branch above, which is a real server
+    // response). Fall back to a verified cached entitlement if one
+    // exists, rather than unconditionally stripping premium access from
+    // someone who was legitimately premium the last time we could check.
+    // verifyOfflineEntitlement() is the ONLY thing allowed to turn this
+    // into `true` — it independently re-derives the value from a
+    // cryptographic signature every time, so it can't be short-circuited
+    // by anything set directly on _isPremium via the console.
+    console.warn('[Auth] _refreshPremiumState network failure, trying cached offline entitlement:', e);
+    try {
+      const cached = await prefGet('rp-offline-entitlement', null);
+      const verified = await verifyOfflineEntitlement(cached, _currentUser.id);
+      if (verified === null) {
+        _isPremium = false;
+        _offlineGraceActive = false;
+      } else {
+        const wasActive = _offlineGraceActive;
+        _isPremium = verified;
+        _offlineGraceActive = verified === true;
+        if (_offlineGraceActive && !wasActive) {
+          showToast('📡 Offline — using your last verified premium status');
+        }
+      }
+    } catch (e2) {
+      console.warn('[Auth] offline entitlement fallback also failed:', e2);
+      _isPremium = false;
+      _offlineGraceActive = false;
+    }
   }
 }
 let _cloudRestoreDone = false;
