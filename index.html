@@ -2838,6 +2838,23 @@ body.game-active .wrap {
     </div>
   </div>
 
+  <!-- Exit-save prompt — fires from goBack() when a game is actively
+       running, on either free or premium (saveToSlot(0) already exists
+       for both tiers; only the cloud-sync half of it is premium-gated,
+       inside saveToSlot() itself, so this prompt doesn't need its own
+       tier check). -->
+  <div class="modal-bg" id="exit-save-modal">
+    <div class="modal" style="max-width:380px">
+      <h3>💾 Save before you go?</h3>
+      <p>Anything since your last save will be lost otherwise. This writes to your Quick Save slot — same one the 💾 Quick save button and F5 use.</p>
+      <div class="modal-actions">
+        <button class="lib-btn" onclick="_exitSaveCancel()">Cancel</button>
+        <button class="lib-btn" onclick="_exitSaveDiscard()">Exit without saving</button>
+        <button class="lib-btn primary" onclick="_exitSaveConfirm()">Save &amp; exit</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ══ PLAYER ══ -->
   <div id="screen-player">
     <div class="top-bar">
@@ -2906,7 +2923,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260916150000"></script>
+<script src="emulator-backbone.js?v=20260924060800"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -6577,7 +6594,67 @@ function cleanup() {
   if (window.EJS_emulator) { try { window.EJS_emulator.pause(); } catch(e){} window.EJS_emulator=null; }
 }
 
+/**
+ * Gate in front of the real exit teardown. Only prompts when a game is
+ * actually running (document.body has 'game-active', set by onGameStart()
+ * and cleared by _teardownAndGoBack() itself) — this is deliberately the
+ * SAME flag the background reconciliation/gamepad-badge logic already
+ * gates on elsewhere in this file, not a new one, so there's exactly one
+ * source of truth for "is a game live right now."
+ *
+ * The two goBack() call sites in launch()'s error paths (script.onerror,
+ * catch block) fire before onGameStart() ever runs, so game-active is
+ * never set there — they fall straight through to _teardownAndGoBack()
+ * below with no prompt and no behavior change, confirmed against
+ * onGameStart()'s own classList.add('game-active') above, not assumed.
+ */
 async function goBack() {
+  const gameIsActive = document.body.classList.contains('game-active');
+  if (!gameIsActive) {
+    await _teardownAndGoBack();
+    return;
+  }
+  document.getElementById('exit-save-modal').classList.add('open');
+}
+
+// ── Exit-save modal choice handlers ──────────────────────────────────
+// No tier check here on purpose: saveToSlot(0) already works identically
+// for free and premium accounts (it's the same Quick Save slot bound to
+// F5 and the 💾 button) — only the Dropbox re-upload half of it is
+// premium-gated, and that gate already lives inside saveToSlot() itself.
+// Duplicating that check here would be a second place to keep in sync
+// for no behavioral gain.
+function _exitSaveCancel() {
+  document.getElementById('exit-save-modal').classList.remove('open');
+  // User backed out — deliberately does NOT call _teardownAndGoBack().
+  // Game stays exactly as it was.
+}
+
+async function _exitSaveDiscard() {
+  document.getElementById('exit-save-modal').classList.remove('open');
+  await _teardownAndGoBack();
+}
+
+async function _exitSaveConfirm() {
+  document.getElementById('exit-save-modal').classList.remove('open');
+  // saveToSlot() never throws — every internal failure path (unready
+  // emulator, getState() error, IDB write error) catches its own error
+  // and shows a toast, then returns normally. So this await always
+  // resolves; the toast it already shows is the only failure signal
+  // there is, and is enough on its own — it does not block the exit
+  // that follows, matching how the existing 💾 Quick save button
+  // behaves during normal play (a failed save there doesn't block
+  // anything else either).
+  await saveToSlot(0);
+  await _teardownAndGoBack();
+}
+
+// Backdrop tap = Cancel, same convention as relaunch-modal/state-picker-modal.
+document.getElementById('exit-save-modal').addEventListener('click', function(e) {
+  if (e.target === this) _exitSaveCancel();
+});
+
+async function _teardownAndGoBack() {
   // Clear any in-flight cover art fetch promises
   _artInflight.clear();
   await _savePlayTime();
@@ -6958,7 +7035,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260916150000';
+const APP_VERSION = '20260924060800';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
