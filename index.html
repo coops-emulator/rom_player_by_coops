@@ -1883,6 +1883,30 @@ body.pseudo-fullscreen-active .pseudo-fs-exit-btn { display: flex; }
 
 /* fs-action-bar removed — EJS native menu handles save/load/mute in fullscreen */
 
+/* ── iOS fixes: fullscreen button reachable + no stretched picture ──────
+   1) .actions is a single horizontally-scrolling row with its scrollbar
+      hidden. On a phone the five buttons overflow it, and ⛶ Fullscreen —
+      last, behind a flex spacer — sat off-screen to the right with nothing
+      hinting it was there. On narrow screens the row now wraps and
+      Fullscreen becomes a full-width first row so it can't be missed.
+   2) EmulatorJS sizes its <canvas> with width:100%;height:100% and no
+      object-fit (verified in its emulator.css), so the picture is stretched
+      to whatever box it's given. Windowed, the holder is close enough to the
+      game's shape; pseudo-fullscreen in portrait is a tall phone screen, which
+      is the stretch. object-fit:contain letterboxes it on black instead. */
+@media (max-width: 600px) {
+  .actions { flex-wrap: wrap; overflow-x: visible; }
+  .actions .spacer { display: none; }
+  .actions .act { flex: 1 1 calc(50% - 6px); justify-content: center; }
+  .actions .act.act-fullscreen { order: -1; flex: 1 1 100%; }
+}
+body.pseudo-fullscreen-active #game canvas,
+#game-holder:fullscreen canvas,
+#game-holder:-webkit-full-screen canvas {
+  object-fit: contain;
+  background: #000;
+}
+
 /* ── Gamepad connected tab ───────────────────────────────────────────
    A small, dim tab docked in the bottom-right corner. It sits outside
    the safe-area inset so it lands in the letterboxed/black margin
@@ -2923,7 +2947,7 @@ body.game-active .wrap {
 <footer>ROM Player by Coops · Emulation core: <a href="https://emulatorjs.org" target="_blank" rel="noopener">EmulatorJS</a>, booted via our own <a href="https://github.com/coops-emulator/coops_emulator_backbone" target="_blank" rel="noopener">coops_emulator_backbone</a> wrapper · Runs 100% locally · No data uploaded</footer>
 <div class="toast" id="toast"></div>
 
-<script src="emulator-backbone.js?v=20260924060800"></script>
+<script src="emulator-backbone.js?v=20260928202644"></script>
 <script>
 /* ══ SYSTEM DEFINITIONS ══════════════════════════════
    `core` is ROM Player's own internal system id — used
@@ -3652,7 +3676,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pending = sessionStorage.getItem(PENDING_RELAUNCH_KEY);
     if (pending) {
       sessionStorage.removeItem(PENDING_RELAUNCH_KEY);
-      const { name, core, sysLabel } = JSON.parse(pending);
+      const { name, core, sysLabel, retried } = JSON.parse(pending);
+      _bootRetried = !!retried;
       libPlayFromDB(name, core, sysLabel);
     }
   } catch(e) {}
@@ -5962,6 +5987,8 @@ let _engine = null;
 // back up, instead of leaving the user to figure out they need to
 // manually refresh between every single game.
 let _ejsBootedOnce = false;
+let _bootWatchdog  = null;   // see the start watchdog in launch()
+let _bootRetried   = false;  // true when this page load IS the watchdog's auto-retry
 const PENDING_RELAUNCH_KEY = 'rp-pending-relaunch';
 
 async function launch(romUrl, sys, name, file) {
@@ -6015,7 +6042,9 @@ async function launch(romUrl, sys, name, file) {
     };
 
     const onGameStart = () => {
+      clearTimeout(_bootWatchdog);
       _ejsReady = true;
+      _syncMuteBtn();
       _sessionStart = Date.now();
       hideLaunchSplash();
       document.body.classList.add('game-active');
@@ -6045,6 +6074,17 @@ async function launch(romUrl, sys, name, file) {
     }
 
     const backbone = window.CoopsEmulatorBackbone;
+
+    // iPhone Safari has no element Fullscreen API (requestFullscreen /
+    // webkitRequestFullscreen are undefined for a <div> there), so EJS's own
+    // in-menu fullscreen button can only flip its icon and do nothing else.
+    // Hide it on iPhone/iPod and leave fullscreen to the ⛶ button above, which
+    // uses pseudo-fullscreen. iPad keeps EJS's button (element fullscreen
+    // exists there). EJS_Buttons accepts `false` per button (verified in
+    // EmulatorJS buildButtonOptions()).
+    if (/iPhone|iPod/.test(navigator.userAgent) && !window.MSStream) {
+      window.EJS_Buttons = Object.assign({}, window.EJS_Buttons, { fullscreen: false });
+    }
 
     // EmulatorJS's own ppsspp core is still labeled beta upstream — it can
     // crash, white-screen, or run slow, especially in 3D-heavy games (i.e.
@@ -6080,6 +6120,40 @@ async function launch(romUrl, sys, name, file) {
     if (sys.core === 'ppsspp') {
       console.log('[launch] PSP: using EmulatorJS nightly channel (experimental) —', engineOpts.pathToData);
     }
+
+    // Start watchdog. EJS_ready (what loadGame() awaits) fires ~20ms after
+    // EmulatorJS creates its start button — verified in the v4.2.3 source —
+    // i.e. BEFORE the core or ROM has downloaded. So loadGame()'s own timeout
+    // can't see a stalled core download at all, and a first launch that
+    // stalls just sits there until the user backs out and retries (which then
+    // works, because the page reload + warm caches get it through). This
+    // watches the real signal, onGameStart, using the per-system boot timeout,
+    // and does that same reload-and-relaunch automatically — once. A second
+    // stall surfaces a real error instead of looping.
+    clearTimeout(_bootWatchdog);
+    const watchdogMs = ((backbone && sys.ejsSystem && backbone.getBootTimeout)
+      ? backbone.getBootTimeout(sys.ejsSystem) : 45000) + 5000;
+    _bootWatchdog = setTimeout(async () => {
+      if (_ejsReady) return;
+      if (_bootRetried) {
+        showErr('The emulator did not start. Check your connection and try again.');
+        hideLaunchSplash();
+        goBack();
+        return;
+      }
+      console.warn('[launch] game did not start within ' + watchdogMs + 'ms — auto-retrying once via reload');
+      try {
+        if (file) await libAdd(name, sys.label, sys.core, file);
+        sessionStorage.setItem(PENDING_RELAUNCH_KEY, JSON.stringify({
+          name, core: sys.core, sysLabel: sys.label, retried: true,
+        }));
+        location.reload();
+      } catch(e) {
+        showErr('The emulator did not start. Try again.');
+        hideLaunchSplash();
+        goBack();
+      }
+    }, watchdogMs);
 
     if (backbone && sys.ejsSystem) {
       // ── Verified path: boot through coops_emulator_backbone ────────────
@@ -6165,7 +6239,14 @@ function showLaunchSplash(name, sys, onReady) {
 
   // Safety net — never trap the user on the splash for more than 12s
   clearTimeout(_splashSafetyTimer);
-  _splashSafetyTimer = setTimeout(() => hideLaunchSplash(), 12000);
+  // Was a flat 12s. That hid the splash while a cold core (first launch, or
+  // any heavy system) was still legitimately downloading, dropping the user
+  // onto an empty player screen that looked like a failed load. Now sized to
+  // the system's own boot allowance — the backbone exports getBootTimeout()
+  // for exactly this — and never shorter than the old 12s.
+  const _bb = window.CoopsEmulatorBackbone;
+  const _splashMs = Math.max(12000, ((_bb && sys.ejsSystem && _bb.getBootTimeout) ? _bb.getBootTimeout(sys.ejsSystem) : 0) + 5000);
+  _splashSafetyTimer = setTimeout(() => hideLaunchSplash(), _splashMs);
 
   // Kick off the actual load after a short beat so the splash is visible
   setTimeout(onReady, 350);
@@ -6421,21 +6502,40 @@ async function renderSlots() {
 }
 
 /* ══ EJS COMMANDS ════════════════════════════════════ */
-let _muted = false;
+/* Mute — drives EmulatorJS's OWN volume state instead of a private flag.
+   ROOT CAUSE of the dead button: this used to call emu.setMuted(), which does
+   not exist anywhere in EmulatorJS (verified against the v4.2.3 source: the
+   only audio API is emu.setVolume(v), plus the emu.muted / emu.volume fields).
+   The call threw a TypeError that the surrounding try/catch swallowed, so the
+   button did nothing and never even flipped its label. EJS's own mute button
+   does exactly: muted=true + setVolume(0) / muted=false + setVolume(volume),
+   falling back to 0.5 if the stored volume is 0 — mirrored here so both
+   buttons stay in step, and emu.muted is the single source of truth. */
+function _syncMuteBtn() {
+  const emu = window.EJS_emulator;
+  const btn = document.getElementById('mute-btn');
+  if (btn) btn.textContent = (emu && emu.muted) ? '🔇 Unmute' : '🔊 Mute';
+}
 function toggleMute() {
-  const emu = window.EJS_emulator; if (!emu) return;
+  const emu = window.EJS_emulator;
+  if (!emu || typeof emu.setVolume !== 'function') { showToast('⚠️ Wait for the game to load'); return; }
   try {
-    _muted = !_muted;
-    emu.setMuted(_muted);
-    const btn = document.getElementById('mute-btn');
-    if (btn) btn.textContent = _muted ? '🔇 Unmute' : '🔊 Mute';
-  } catch(e) {}
+    if (emu.muted) {
+      if (!emu.volume) emu.volume = 0.5;
+      emu.muted = false;
+      emu.setVolume(emu.volume);
+    } else {
+      emu.muted = true;
+      emu.setVolume(0);
+    }
+  } catch(e) { console.warn('[mute]', e); }
+  _syncMuteBtn();
 }
 
 function ejsCmd(cmd) {
   const emu = window.EJS_emulator; if (!emu) return;
   try {
-    if (cmd==='restart') { _muted = false; const btn=document.getElementById('mute-btn'); if(btn) btn.textContent='🔊 Mute'; emu.restart(); }
+    if (cmd==='restart') { emu.restart(); _syncMuteBtn(); }
   } catch(e) {}
 }
 
@@ -6582,6 +6682,7 @@ window.addEventListener('gamepaddisconnected', () => {
 
 /* ══ CLEANUP / NAVIGATION ════════════════════════════ */
 function cleanup() {
+  clearTimeout(_bootWatchdog);
   _ejsReady = false;
   document.getElementById('ejs-loader') && document.getElementById('ejs-loader').remove();
   document.querySelectorAll('script[src*="emulatorjs"],script[src*="cdn.emulatorjs"]').forEach(s=>s.remove());
@@ -6666,6 +6767,8 @@ async function _teardownAndGoBack() {
   document.getElementById('screen-loader').style.display = 'block';
   document.getElementById('file-inp').value = '';
   renderRecentlyPlayed();
+  // A service-worker update landed while the game was up — apply it now.
+  if (_swReloadDeferred) { _swReloadDeferred = false; setTimeout(() => location.reload(), 150); }
 }
 
 function showCtrl(btn, id) {
@@ -7035,7 +7138,7 @@ _storageReadyPromise.then(async () => {
    the server every load. If newer, the update banner
    appears automatically in Settings.
 ═══════════════════════════════════════════════════ */
-const APP_VERSION = '20260924060800';
+const APP_VERSION = '20260928202644';
 
 // VERSION_URL: source of truth for checking whether an update is available.
 // We check our own Cloudflare domain first — instant and always in sync with what's live.
@@ -8749,9 +8852,16 @@ window.openSettings = function() {
 };
 
 // Service Worker registration
+let _swHadController = false;
+let _swReloadDeferred = false;
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
+      // Captured BEFORE register(): true only when an older SW already
+      // controls this page, i.e. a controllerchange later means a genuine
+      // update. A first-ever install also fires controllerchange (sw.js calls
+      // clients.claim()), and reloading for that was pointless.
+      _swHadController = !!navigator.serviceWorker.controller;
       const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
       console.log('[SW] Registered, scope:', reg.scope);
 
@@ -8772,7 +8882,20 @@ if ('serviceWorker' in navigator) {
     }
 
     // When the new SW takes control, reload once so the fresh HTML is used
+    // ROOT CAUSE candidate for "first launch dies, second works": this used to
+    // reload unconditionally. The SW's install step precaches several MB of CDN
+    // files, so on a fresh deploy the swap (skipWaiting -> controllerchange)
+    // lands seconds-to-tens-of-seconds after page load — easily mid-launch,
+    // wiping the booting game and dumping the user on the home screen. Now:
+    // no reload on first install, and when a game is booting/running the
+    // reload is deferred until they leave it (goBack -> _teardownAndGoBack).
     navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!_swHadController) return;
+      if (_ejsBootedOnce || document.body.classList.contains('game-active')) {
+        console.log('[SW] Controller changed mid-game — deferring reload');
+        _swReloadDeferred = true;
+        return;
+      }
       console.log('[SW] Controller changed — reloading for fresh content');
       window.location.reload();
     });
